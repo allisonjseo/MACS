@@ -54,3 +54,7 @@ coverage.xml
 *.swp
 *.swo
 *~
+
+# Downloaded evaluation data and run artifacts
+/data/
+/runs/
