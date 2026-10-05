@@ -11,8 +11,9 @@ the model's visual interpretation rather than retrieving labeled images.
 
 The default prompt asks for best point estimates for all food in the photograph,
 including inferred portion sizes. It directs the model to use only the photo and
-return a JSON object containing four numeric values. The output schema validates
-those values as finite, nonnegative numbers. A custom prompt can be supplied with
+return a JSON object containing `mean` and `sigma` objects, each with all four
+nutrients. The output schema requires finite, nonnegative values for both.
+A custom prompt can be supplied with
 `--prompt-file`; the selected prompt is recorded in the run configuration.
 
 Each image is sent in a fresh ephemeral Codex thread. The image is attached
@@ -21,16 +22,16 @@ search and tool features disabled. The evaluator also rejects turns that report
 tool use. A timeout applies separately to each image. Failed or timed-out turns
 are recorded as failed predictions.
 
-By default, the Codex SDK uses its configured model. Set `--model` to record and
-use a specific model. The current project examples use `gpt-6.1-sol`.
+Defaults are `gpt-6-luna` with `low` reasoning effort. Use `--model` and
+`--reasoning-effort` to select and record both settings explicitly.
 
 ## Ranges
 
-The current schema and default prompt request a single point estimate per
-nutrient. The Codex backend does not produce a prediction interval, so its
-interval coverage and mean-width metrics are null. The SIFT ranges described in
-[`sift.md`](sift.md) are specific to that retrieval baseline and are not applied
-to Codex results.
+For each nutrient, `sigma` is the model-estimated 95% prediction interval
+half-width, in the same units as its mean. The interval is `mean ± sigma`, with
+no clipping; sigma is not a standard deviation. The evaluator measures coverage
+against the labels rather than assuming 95% coverage. The heuristic SIFT ranges
+described in [`sift.md`](sift.md) remain separate from these model estimates.
 
 ## Evaluation
 
@@ -46,9 +47,9 @@ Authenticate with `uv run codex login`, then run:
 
 ```sh
 uv run eval.py run \
-  --data-dir ./nutrition5k-sift-full \
+  --data-dir ./data/nutrition5k-200 \
   --predictor codex \
-  --model gpt-6.1-sol \
+  --model gpt-6-luna --reasoning-effort low \
   --limit 2 \
   --output ./codex-smoke-results
 ```

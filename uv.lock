@@ -195,9 +195,9 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "numpy", specifier = ">=2.0.0" },
+    { name = "numpy", specifier = ">=2.5.3" },
     { name = "openai-codex", specifier = ">=0.160.0" },
-    { name = "opencv-python-headless", specifier = ">=4.10.0.84" },
+    { name = "opencv-python-headless", specifier = ">=5.0.0.93" },
     { name = "polars", specifier = ">=1.44.2" },
     { name = "pydantic", specifier = ">=2.13.5" },
     { name = "torch", specifier = ">=2.5.0" },

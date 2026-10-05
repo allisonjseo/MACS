@@ -6,10 +6,11 @@ from pathlib import Path
 
 import pytest
 
+from determinism import DeterminismConfig
 from eval import score
 from predictors import MeanConfig
 from run import EvaluationRun, GitRevision, RunConfig
-from schemas import EvaluationRecord, Nutrition
+from schemas import EvaluationRecord, Nutrition, Prediction
 
 
 def config(project_dir: Path) -> RunConfig:
@@ -17,6 +18,7 @@ def config(project_dir: Path) -> RunConfig:
         predictor=MeanConfig(
             values=Nutrition(calories_kcal=100, protein_g=10, carbs_g=20, fat_g=5)
         ),
+        determinism=DeterminismConfig(seed=42),
         manifest=b"manifest bytes",
         sample_ids=["sample-1", "sample-2"],
         timeout_seconds=5,
@@ -81,13 +83,18 @@ def test_run_checkpoints_results_and_exports_successes_and_failures(tmp_path):
     )
     assert saved_config.predictor.backend == cfg.predictor.backend
     assert saved_config.git == cfg.git
+    assert saved_config.determinism == cfg.determinism
+    assert saved_config.python_version == cfg.python_version
     target = Nutrition(calories_kcal=200, protein_g=20, carbs_g=30, fat_g=10)
     success = EvaluationRecord(
         id="sample-1",
         target=target,
         status="ok",
         latency_seconds=1.0,
-        prediction=Nutrition(calories_kcal=100, protein_g=20, carbs_g=30, fat_g=10),
+        prediction=Prediction(
+            mean=Nutrition(calories_kcal=100, protein_g=20, carbs_g=30, fat_g=10),
+            sigma=Nutrition(calories_kcal=100, protein_g=5, carbs_g=10, fat_g=2),
+        ),
     )
     failure = EvaluationRecord(
         id="sample-2",

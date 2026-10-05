@@ -1,4 +1,4 @@
-"""Prediction backends. Each exposes predict(image) -> Nutrition."""
+"""Prediction backends. Each exposes predict(image) -> Prediction."""
 
 import asyncio
 import hashlib
@@ -22,6 +22,8 @@ from openai_codex import (
     Sandbox,
     TextInput,
 )
+from openai_codex.generated.v2_all import ReasoningEffort
+from pydantic import BaseModel
 from tqdm import tqdm
 
 from schemas import (
@@ -30,7 +32,9 @@ from schemas import (
     ImageInput,
     Nutrition,
     NutritionInterval,
+    Prediction,
     PredictorConfig,
+    UncertainPrediction,
 )
 
 SIFT_INTERVAL_FRACTION = 0.25
@@ -44,9 +48,14 @@ class MeanConfig(PredictorConfig):
     values: Nutrition
 
 
+class CodexModel(BaseModel):
+    id: str
+    reasoning_effort: ReasoningEffort
+
+
 class CodexPredictorConfig(PredictorConfig):
     backend: Literal["codex"] = "codex"
-    model: str | None
+    model: CodexModel
     prompt: str
     sdk_version: str
     runtime_version: str
@@ -75,15 +84,22 @@ class Predictor(ABC):
     last_interval: NutritionInterval | None = None
 
     @abstractmethod
-    def predict(self, image: ImageInput) -> Nutrition: ...
+    def predict(self, image: ImageInput) -> Prediction: ...
 
 
 PROMPT = (
     "Estimate the total nutrition of ALL food shown in the attached photograph. "
     "Infer portion sizes from the image. Return your best point estimates of "
     "calories in kcal and protein, carbohydrates, and fat in grams. "
+    "For EACH nutrient, also estimate a nonnegative uncertainty half-width sigma "
+    "such that mean - sigma to mean + sigma is your 95% prediction interval for "
+    "the actual total nutrition. Account for uncertainty in food identity, hidden "
+    "ingredients, and portion sizes. Sigma here means the 95% interval half-width, "
+    "NOT one standard deviation. Use kcal for calorie sigma and grams for macro "
+    "sigmas, in the same units as the corresponding means. "
     "Use only the photograph; do not search, inspect other files, or use tools. "
-    "Return only a JSON object with these numeric keys: " + ", ".join(FIELDS) + "."
+    "Return only a JSON object containing mean and sigma objects, each with these "
+    "numeric keys: " + ", ".join(FIELDS) + ". Supply every sigma; do not use null."
 )
 
 
@@ -95,8 +111,8 @@ class MeanPredictor(Predictor):
     def __init__(self, values: Nutrition):
         self.config = MeanConfig(values=values)
 
-    def predict(self, image: ImageInput) -> Nutrition:
-        return self.config.values.model_copy()
+    def predict(self, image: ImageInput) -> Prediction:
+        return Prediction(mean=self.config.values.model_copy())
 
 
 @dataclass(frozen=True)
@@ -297,7 +313,7 @@ class SiftPredictor(Predictor):
             upper[field] = value + half_width
         return NutritionInterval(lower=Nutrition(**lower), upper=Nutrition(**upper))
 
-    def predict(self, image: ImageInput) -> Nutrition:
+    def predict(self, image: ImageInput) -> Prediction:
         self.last_interval = None
         query = self._descriptors(image)
         if query is None or len(query) < 2:
@@ -307,7 +323,7 @@ class SiftPredictor(Predictor):
             }
             prediction = self.config.fallback.model_copy()
             self.last_interval = self._interval(prediction, self.fallback_spread)
-            return prediction
+            return Prediction(mean=prediction)
         scored_by_reference = {}
         if self.index_references:
             # One global match operation replaces thousands of per-reference
@@ -337,7 +353,7 @@ class SiftPredictor(Predictor):
         if not nearest:
             prediction = self.config.fallback.model_copy()
             self.last_interval = self._interval(prediction, self.fallback_spread)
-            return prediction
+            return Prediction(mean=prediction)
         weight = sum(score for score, _ in nearest)
         prediction = Nutrition(
             **{
@@ -362,7 +378,7 @@ class SiftPredictor(Predictor):
             for field in FIELDS
         }
         self.last_interval = self._interval(prediction, spread)
-        return prediction
+        return Prediction(mean=prediction)
 
 
 class CodexPredictor(Predictor):
@@ -370,16 +386,23 @@ class CodexPredictor(Predictor):
 
     config: CodexPredictorConfig
 
-    def __init__(self, model: str | None, timeout: int, *, prompt: str = PROMPT):
+    def __init__(
+        self,
+        model: str,
+        timeout: int,
+        *,
+        prompt: str = PROMPT,
+        reasoning_effort: ReasoningEffort = ReasoningEffort.low,
+    ):
         self.timeout = timeout
         self.config = CodexPredictorConfig(
-            model=model,
+            model=CodexModel(id=model, reasoning_effort=reasoning_effort),
             prompt=prompt,
             sdk_version=version("openai-codex"),
             runtime_version=version("openai-codex-cli-bin"),
         )
 
-    def predict(self, image: ImageInput) -> Nutrition:
+    def predict(self, image: ImageInput) -> Prediction:
         with tempfile.TemporaryDirectory(prefix="nutrition-codex-") as name:
             root = Path(name)
             extension = image.media_type.split("/", 1)[1]
@@ -389,7 +412,7 @@ class CodexPredictor(Predictor):
             async def infer():
                 async with AsyncCodex(CodexConfig(cwd=str(root))) as codex:
                     thread = await codex.thread_start(
-                        model=self.config.model,
+                        model=self.config.model.id,
                         cwd=str(root),
                         ephemeral=True,
                         sandbox=Sandbox.read_only,
@@ -409,6 +432,7 @@ class CodexPredictor(Predictor):
                     return await thread.run(
                         [TextInput(self.config.prompt), LocalImageInput(str(photo))],
                         output_schema=SCHEMA,
+                        effort=self.config.model.reasoning_effort,
                     )
 
             async def bounded_infer():
@@ -421,4 +445,4 @@ class CodexPredictor(Predictor):
             for item in result.items:
                 if item.root.type not in {"userMessage", "agentMessage", "reasoning"}:
                     raise RuntimeError("Image-only run used a tool: " + item.root.type)
-            return Nutrition.model_validate_json(result.final_response or "")
+            return UncertainPrediction.model_validate_json(result.final_response or "")

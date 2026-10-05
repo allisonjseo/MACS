@@ -19,8 +19,11 @@ from urllib.request import urlopen
 
 import polars as pl
 import typer
+from openai_codex.generated.v2_all import ReasoningEffort
 from tqdm import tqdm
 
+from classical import ClassicalPredictor
+from determinism import MAX_SEED, configure_determinism
 from predictors import (
     CodexPredictor,
     MeanPredictor,
@@ -49,6 +52,7 @@ class Backend(StrEnum):
     codex = "codex"
     mean = "mean"
     sift = "sift"
+    classical = "classical"
 
 
 def download(relative, destination):
@@ -83,7 +87,7 @@ def read_metadata(paths: list[Path]) -> dict[str, Nutrition]:
 @app.command()
 def prepare(
     data_dir: Annotated[Path, typer.Option(help="Dataset cache directory")] = Path(
-        "data/nutrition5k"
+        "data/nutrition5k-200"
     ),
     source_dir: Annotated[
         Path | None,
@@ -91,7 +95,7 @@ def prepare(
             help="Existing raw Nutrition5k directory; manifests are written to data-dir"
         ),
     ] = None,
-    n: Annotated[int, typer.Option(min=1)] = 20,
+    n: Annotated[int, typer.Option(min=1)] = 200,
     reference_n: Annotated[
         int,
         typer.Option(
@@ -99,9 +103,13 @@ def prepare(
             help="Number of labeled RGB training images to cache for SIFT retrieval",
         ),
     ] = 0,
-    seed: Annotated[int, typer.Option()] = 42,
+    seed: Annotated[int, typer.Option(min=0, max=MAX_SEED)] = 42,
+    all_samples: Annotated[
+        bool, typer.Option("--all", help="Prepare every available overhead test image")
+    ] = False,
 ):
-    """Download a reproducible small test subset."""
+    """Download a seeded, shuffled test subset (default: 200 images)."""
+    configure_determinism(seed)
     root = data_dir.resolve()
     root.mkdir(parents=True, exist_ok=True)
     source_root = source_dir.resolve() if source_dir else root
@@ -144,11 +152,7 @@ def prepare(
     if not train:
         raise ValueError("No training labels found")
     means = Nutrition(
-        **pl.DataFrame(
-            {key: [getattr(label, key) for label in train] for key in FIELDS}
-        )
-        .select(pl.all().mean())
-        .row(0, named=True)
+        **{key: fmean(getattr(label, key) for label in train) for key in FIELDS}
     )
     candidates = sorted(splits["test"] & labels.keys())
     random.Random(seed).shuffle(candidates)
@@ -179,9 +183,11 @@ def prepare(
                 target=labels[dish],
             )
         )
-        if len(samples) == n:
+        requested = "all" if all_samples else str(n)
+        print(f"Downloaded {len(samples)}/{requested}: {dish}", flush=True)
+        if not all_samples and len(samples) == n:
             break
-    if len(samples) != n:
+    if not samples or (not all_samples and len(samples) != n):
         raise ValueError(f"Only {len(samples)} test images available")
     reference_candidates = sorted(splits["train"] & labels.keys())
     random.Random(seed + 1).shuffle(reference_candidates)
@@ -226,7 +232,7 @@ def prepare(
         license="CC BY 4.0",
         split="rgb_test",
         seed=seed,
-        n=n,
+        n=len(samples),
         missing_overhead_images=missing,
         training_mean=means,
         training_label_count=len(train),
@@ -250,7 +256,7 @@ def score(rows: list[EvaluationRecord]) -> EvaluationSummary:
         frame = pl.DataFrame(
             {
                 **{
-                    key: [getattr(prediction, key) for prediction, _ in good]
+                    key: [getattr(prediction.mean, key) for prediction, _ in good]
                     for key in FIELDS
                 },
                 **{
@@ -259,13 +265,12 @@ def score(rows: list[EvaluationRecord]) -> EvaluationSummary:
                 },
             }
         )
-        means = frame.select(
-            [
-                (pl.col(key) - pl.col(key + "_target")).abs().mean().alias(key)
-                for key in FIELDS
-            ]
-        ).row(0, named=True)
-        metrics = {key: Metric(mae=means[key]) for key in FIELDS}
+        # Vector arithmetic preserves row order; fmean avoids parallel reductions
+        # whose floating-point addition order can vary with worker scheduling.
+        errors = frame.select(
+            [(pl.col(key) - pl.col(key + "_target")).abs().alias(key) for key in FIELDS]
+        )
+        metrics = {key: Metric(mae=fmean(errors[key].to_list())) for key in FIELDS}
         interval_rows = [
             (row.prediction_interval, row.target)
             for row in rows
@@ -273,21 +278,35 @@ def score(rows: list[EvaluationRecord]) -> EvaluationSummary:
             and row.prediction is not None
             and row.prediction_interval is not None
         ]
+        uncertain = [
+            (row.prediction.mean, row.prediction.sigma, row.target)
+            for row in rows
+            if row.status == "ok"
+            and row.prediction is not None
+            and row.prediction.sigma is not None
+            and row.prediction_interval is None
+        ]
         for key in FIELDS:
-            if interval_rows:
+            interval_count = len(uncertain) + len(interval_rows)
+            if interval_count:
                 covered = sum(
+                    abs(getattr(mean, key) - getattr(target, key))
+                    <= getattr(sigma, key)
+                    for mean, sigma, target in uncertain
+                ) + sum(
                     getattr(interval.lower, key)
                     <= getattr(target, key)
                     <= getattr(interval.upper, key)
                     for interval, target in interval_rows
                 )
-                metrics[key].interval_count = len(interval_rows)
-                metrics[key].interval_coverage_percent = (
-                    100 * covered / len(interval_rows)
-                )
+                metrics[key].interval_count = interval_count
+                metrics[key].interval_coverage_pct = 100 * covered / interval_count
                 metrics[key].mean_interval_width = fmean(
-                    getattr(interval.upper, key) - getattr(interval.lower, key)
-                    for interval, _ in interval_rows
+                    [2 * getattr(sigma, key) for _, sigma, _ in uncertain]
+                    + [
+                        getattr(interval.upper, key) - getattr(interval.lower, key)
+                        for interval, _ in interval_rows
+                    ]
                 )
         calories = frame.filter(pl.col("calories_kcal_target") > 0)
         eligible = calories.height
@@ -314,10 +333,13 @@ def score(rows: list[EvaluationRecord]) -> EvaluationSummary:
 @app.command()
 def run(
     data_dir: Annotated[Path, typer.Option(help="Dataset cache directory")] = Path(
-        "data/nutrition5k"
+        "data/nutrition5k-200"
     ),
     predictor: Annotated[Backend, typer.Option()] = Backend.codex,
-    model: Annotated[str | None, typer.Option(help="Codex model")] = None,
+    model: Annotated[str, typer.Option(help="Codex model ID")] = "gpt-6-luna",
+    reasoning_effort: Annotated[
+        ReasoningEffort, typer.Option(help="Codex reasoning effort")
+    ] = ReasoningEffort.low,
     timeout: Annotated[int, typer.Option(min=1)] = 300,
     limit: Annotated[
         int | None, typer.Option(min=1, help="Run only the first N samples")
@@ -343,6 +365,7 @@ def run(
     manifest_path = (data_dir / "manifest.json").resolve()
     raw_manifest = manifest_path.read_bytes()
     manifest = Manifest.model_validate_json(raw_manifest)
+    determinism = configure_determinism(manifest.seed)
     samples = manifest.samples
     if limit:
         samples = samples[:limit]
@@ -356,10 +379,17 @@ def run(
     backend: Predictor
     if predictor == "codex":
         backend = (
-            CodexPredictor(model, timeout, prompt=prompt_file.read_text())
+            CodexPredictor(
+                model,
+                timeout,
+                prompt=prompt_file.read_text(),
+                reasoning_effort=reasoning_effort,
+            )
             if prompt_file
-            else CodexPredictor(model, timeout)
+            else CodexPredictor(model, timeout, reasoning_effort=reasoning_effort)
         )
+    elif predictor == "classical":
+        backend = ClassicalPredictor(manifest.training_mean)
     elif predictor == "mean":
         backend = MeanPredictor(manifest.training_mean)
     else:
@@ -400,6 +430,7 @@ def run(
     recording = EvaluationRun(
         RunConfig.capture(
             predictor=backend.config,
+            determinism=determinism,
             manifest=raw_manifest,
             sample_ids=[sample.id for sample in samples],
             timeout_seconds=timeout,
@@ -407,7 +438,9 @@ def run(
         summarize=score,
         output=output,
     )
-    for sample in tqdm(samples, desc="Evaluating SIFT", unit="image"):
+    for index, sample in enumerate(
+        tqdm(samples, desc=f"Evaluating {backend.config.backend}", unit="image"), 1
+    ):
         row = EvaluationRecord(id=sample.id, target=sample.target)
         backend.last_metadata = None
         backend.last_interval = None
@@ -427,6 +460,11 @@ def run(
         row.latency_seconds = time.monotonic() - started
         row.backend_metadata = backend.last_metadata
         recording.record(row)
+        print(
+            f"[{index}/{len(samples)}] {sample.id}: {row.status} "
+            f"({row.latency_seconds:.1f}s)",
+            flush=True,
+        )
     print(recording.summary.model_dump_json(indent=2))
     print("Results: " + str(recording.output.resolve()))
     raise typer.Exit(1 if recording.summary.failed else 0)

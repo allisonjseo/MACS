@@ -1,6 +1,7 @@
 """Capture run provenance and persist configuration, predictions, and metrics."""
 
 import hashlib
+import platform
 import subprocess
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -9,6 +10,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, TypeAdapter
 
+from determinism import DeterminismConfig
 from schemas import EvaluationRecord, EvaluationSummary, PredictorConfig
 
 PROJECT_DIR = Path(__file__).resolve().parent
@@ -60,11 +62,13 @@ class RunConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     predictor: SerializeAsAny[PredictorConfig]
+    determinism: DeterminismConfig
     manifest_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     sample_ids: list[str]
     timeout_seconds: int = Field(gt=0)
     started_at: str
     dependencies: dict[str, str]
+    python_version: str
     git: GitRevision
 
     @classmethod
@@ -72,6 +76,7 @@ class RunConfig(BaseModel):
         cls,
         *,
         predictor: PredictorConfig,
+        determinism: DeterminismConfig,
         manifest: bytes,
         sample_ids: list[str],
         timeout_seconds: int,
@@ -79,6 +84,7 @@ class RunConfig(BaseModel):
     ) -> "RunConfig":
         return cls(
             predictor=predictor,
+            determinism=determinism,
             manifest_sha256=hashlib.sha256(manifest).hexdigest(),
             sample_ids=sample_ids,
             timeout_seconds=timeout_seconds,
@@ -92,8 +98,11 @@ class RunConfig(BaseModel):
                     "openai-codex",
                     "opencv-python-headless",
                     "typer",
+                    "torch",
+                    "tqdm",
                 )
             },
+            python_version=platform.python_version(),
             git=GitRevision.capture(project_dir),
         )
 

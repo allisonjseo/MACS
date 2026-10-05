@@ -35,7 +35,27 @@ class NutritionInterval(BaseModel):
 
 
 FIELDS = tuple(Nutrition.model_fields)
-SCHEMA = Nutrition.model_json_schema()
+
+
+class Prediction(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mean: Nutrition
+    sigma: Nutrition | None = Field(
+        default=None,
+        description="Half-width of each model-estimated 95% interval, in target units; "
+        "not a standard deviation. Null means uncertainty is unavailable.",
+    )
+
+
+class UncertainPrediction(Prediction):
+    """Structured model output requires uncertainty for every nutrient."""
+
+    # Keep this a bare $ref: Codex structured output forbids sibling descriptions.
+    sigma: Nutrition
+
+
+SCHEMA = UncertainPrediction.model_json_schema()
 
 
 class Sample(BaseModel):
@@ -104,7 +124,7 @@ class EvaluationRecord(BaseModel):
     target: Nutrition
     status: Literal["ok", "error"] = "error"
     latency_seconds: NonnegativeNumber = 0.0
-    prediction: Nutrition | None = None
+    prediction: Prediction | None = None
     prediction_interval: NutritionInterval | None = None
     error: str | None = None
     backend_metadata: Any = None
@@ -112,8 +132,8 @@ class EvaluationRecord(BaseModel):
 
 class Metric(BaseModel):
     mae: NonnegativeNumber | None = None
-    interval_count: int = 0
-    interval_coverage_percent: NonnegativeNumber | None = None
+    interval_count: int = Field(default=0, ge=0)
+    interval_coverage_pct: NonnegativeNumber | None = Field(default=None, le=100)
     mean_interval_width: NonnegativeNumber | None = None
 
 
