@@ -42,7 +42,21 @@ match. `--sift-neighbors`, `--sift-ratio-threshold`, and `--sift-max-features`
 are recorded in the run configuration; tune them on a held-out part of the
 training split, not on the test subset.
 
+SIFT also reports a heuristic range for each nutrient. Its center is the
+similarity-weighted estimate and its half-width is the largest of the weighted
+standard deviation of selected neighbor labels, 25% of the estimate, or a fixed
+minimum (50 kcal, 3 g protein, 5 g carbohydrates, 3 g fat). Lower bounds are
+clipped at zero. With no reliable matches, the center is the training-label mean
+and the spread is the standard deviation of reference labels. These ranges are
+not calibrated confidence or prediction intervals.
+
 The CLI uses Typer; run `uv run eval.py --help` to see commands and options.
+
+Method notes for the implemented evaluation backends are in [`docs/`](docs/):
+the [training mean](docs/mean.md), [SIFT retrieval](docs/sift.md), and
+[Codex vision baseline](docs/codex.md).
+The [data directory layout](docs/data-layout.md) records the local Nutrition5k
+source and prepared SIFT cache structure.
 
 Every backend implements the same `predict(image) -> Nutrition` contract in
 `predictors.py`. Dataset loading, output validation, and metrics live in `eval.py`.
@@ -77,13 +91,18 @@ Each run creates a new `runs/<timestamp>-<backend>/` directory containing:
   reference labels, and latency. Codex records also include typed SDK items and
   token usage.
 - `summary.json`: mean absolute error for each target, calorie estimates within
-  ±20%, success/failure counts, and average latency. Updated after every image.
+  ±20%, interval coverage and mean width for backends that return ranges,
+  success/failure counts, and average latency. Updated after every image.
 
 MAE and the ±20% rate use successful predictions only; inspect failure counts
 when comparing backends. Zero-calorie references are excluded from the percentage
 metric, but included in MAE. All-failed runs report null metrics and exit with
 status 1. Any failed prediction gives the run a nonzero exit status. Reusing an
 output directory is rejected to protect existing results.
+Interval coverage is the percentage of true nutrient values inside the reported
+bounds, counted separately for each nutrient; mean width is upper minus lower
+after clipping. Point-only backends report zero interval count and null interval
+metrics.
 
 Use the same manifest and sample limit for comparisons, and the same prompt when
 comparing Codex models. Pin the Codex

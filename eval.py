@@ -9,6 +9,7 @@ import hashlib
 import io
 import random
 import time
+from email.message import Message
 from enum import StrEnum
 from pathlib import Path
 from statistics import fmean
@@ -18,6 +19,7 @@ from urllib.request import urlopen
 
 import polars as pl
 import typer
+from tqdm import tqdm
 
 from predictors import (
     CodexPredictor,
@@ -83,6 +85,12 @@ def prepare(
     data_dir: Annotated[Path, typer.Option(help="Dataset cache directory")] = Path(
         "data/nutrition5k"
     ),
+    source_dir: Annotated[
+        Path | None,
+        typer.Option(
+            help="Existing raw Nutrition5k directory; manifests are written to data-dir"
+        ),
+    ] = None,
     n: Annotated[int, typer.Option(min=1)] = 20,
     reference_n: Annotated[
         int,
@@ -96,23 +104,39 @@ def prepare(
     """Download a reproducible small test subset."""
     root = data_dir.resolve()
     root.mkdir(parents=True, exist_ok=True)
+    source_root = source_dir.resolve() if source_dir else root
     manifest_path = root / "manifest.json"
     if manifest_path.exists():
         raise ValueError(
             "Manifest already exists. Reuse it, or choose a new --data-dir."
         )
+    # The official Nutrition5k download uses the raw layout
+    # ``imagery/realsense_overhead/<dish>/rgb.png``.  In that layout many
+    # split IDs legitimately have no overhead image, so use existing files
+    # directly instead of trying to materialize a separate cache.
+    local_raw = (source_root / "dish_ids" / "splits").is_dir() and (
+        source_root / "imagery" / "realsense_overhead"
+    ).is_dir()
     metadata_paths = []
     for cafe in (1, 2):
         relative = f"metadata/dish_metadata_cafe{cafe}.csv"
-        path = root / relative
-        download(relative, path)
+        path = source_root / relative if local_raw else root / relative
+        if local_raw:
+            if not path.exists():
+                raise ValueError("Missing local dataset file: " + str(path))
+        else:
+            download(relative, path)
         metadata_paths.append(path)
     labels = read_metadata(metadata_paths)
     splits = {}
     for split in ("train", "test"):
         relative = f"dish_ids/splits/rgb_{split}_ids.txt"
-        path = root / relative
-        download(relative, path)
+        path = source_root / relative if local_raw else root / relative
+        if local_raw:
+            if not path.exists():
+                raise ValueError("Missing local dataset file: " + str(path))
+        else:
+            download(relative, path)
         splits[split] = set(path.read_text().split())
     if splits["train"] & splits["test"]:
         raise ValueError("Training and test splits overlap")
@@ -129,11 +153,19 @@ def prepare(
     candidates = sorted(splits["test"] & labels.keys())
     random.Random(seed).shuffle(candidates)
     samples, missing = [], []
-    for dish in candidates:
+    for dish in tqdm(candidates, desc="Preparing test images", unit="image"):
         relative = f"imagery/realsense_overhead/{dish}/rgb.png"
-        image = root / "images" / (dish + ".png")
+        image = (
+            source_root / relative if local_raw else root / "images" / (dish + ".png")
+        )
         try:
-            download(relative, image)
+            if local_raw:
+                if not image.exists():
+                    raise HTTPError(
+                        relative, 404, "missing local image", Message(), None
+                    )
+            else:
+                download(relative, image)
         except HTTPError as error:
             if error.code != 404:
                 raise
@@ -142,12 +174,11 @@ def prepare(
         samples.append(
             Sample(
                 id=dish,
-                image=str(image.relative_to(root)),
+                image=str(image) if local_raw else str(image.relative_to(root)),
                 image_sha256=hashlib.sha256(image.read_bytes()).hexdigest(),
                 target=labels[dish],
             )
         )
-        print(f"Downloaded {len(samples)}/{n}: {dish}", flush=True)
         if len(samples) == n:
             break
     if len(samples) != n:
@@ -155,13 +186,25 @@ def prepare(
     reference_candidates = sorted(splits["train"] & labels.keys())
     random.Random(seed + 1).shuffle(reference_candidates)
     references, missing_references = [], []
-    for dish in reference_candidates:
+    for dish in tqdm(
+        reference_candidates, desc="Preparing train references", unit="image"
+    ):
         if len(references) == reference_n:
             break
         relative = f"imagery/realsense_overhead/{dish}/rgb.png"
-        image = root / "references" / (dish + ".png")
+        image = (
+            source_root / relative
+            if local_raw
+            else root / "references" / (dish + ".png")
+        )
         try:
-            download(relative, image)
+            if local_raw:
+                if not image.exists():
+                    raise HTTPError(
+                        relative, 404, "missing local image", Message(), None
+                    )
+            else:
+                download(relative, image)
         except HTTPError as error:
             if error.code != 404:
                 raise
@@ -170,13 +213,10 @@ def prepare(
         references.append(
             Sample(
                 id=dish,
-                image=str(image.relative_to(root)),
+                image=str(image) if local_raw else str(image.relative_to(root)),
                 image_sha256=hashlib.sha256(image.read_bytes()).hexdigest(),
                 target=labels[dish],
             )
-        )
-        print(
-            f"Downloaded reference {len(references)}/{reference_n}: {dish}", flush=True
         )
     if len(references) != reference_n:
         raise ValueError(f"Only {len(references)} training reference images available")
@@ -226,6 +266,29 @@ def score(rows: list[EvaluationRecord]) -> EvaluationSummary:
             ]
         ).row(0, named=True)
         metrics = {key: Metric(mae=means[key]) for key in FIELDS}
+        interval_rows = [
+            (row.prediction_interval, row.target)
+            for row in rows
+            if row.status == "ok"
+            and row.prediction is not None
+            and row.prediction_interval is not None
+        ]
+        for key in FIELDS:
+            if interval_rows:
+                covered = sum(
+                    getattr(interval.lower, key)
+                    <= getattr(target, key)
+                    <= getattr(interval.upper, key)
+                    for interval, target in interval_rows
+                )
+                metrics[key].interval_count = len(interval_rows)
+                metrics[key].interval_coverage_percent = (
+                    100 * covered / len(interval_rows)
+                )
+                metrics[key].mean_interval_width = fmean(
+                    getattr(interval.upper, key) - getattr(interval.lower, key)
+                    for interval, _ in interval_rows
+                )
         calories = frame.filter(pl.col("calories_kcal_target") > 0)
         eligible = calories.height
         within = calories.filter(
@@ -284,7 +347,9 @@ def run(
     if limit:
         samples = samples[:limit]
     # Validate everything before launching any potentially paid inference.
-    for sample in [*samples, *manifest.references]:
+    for sample in tqdm(
+        [*samples, *manifest.references], desc="Checking image files", unit="image"
+    ):
         image = manifest_path.parent / sample.image
         if hashlib.sha256(image.read_bytes()).hexdigest() != sample.image_sha256:
             raise ValueError("Image checksum mismatch: " + sample.id)
@@ -302,9 +367,12 @@ def run(
             raise ValueError(
                 "SIFT predictor needs training references; run prepare with --reference-n"
             )
-        backend = SiftPredictor(
-            [
-                (
+
+        def load_references():
+            for reference in tqdm(
+                manifest.references, desc="Loading train references", unit="image"
+            ):
+                yield (
                     reference.id,
                     ImageInput(
                         data=(manifest_path.parent / reference.image).read_bytes(),
@@ -312,13 +380,23 @@ def run(
                     ),
                     reference.target,
                 )
-                for reference in manifest.references
-            ],
+
+        backend = SiftPredictor(
+            load_references(),
             manifest.training_mean,
             neighbors=sift_neighbors,
             ratio_threshold=sift_ratio_threshold,
             max_features=sift_max_features,
+            feature_cache=manifest_path.parent / "sift-features",
         )
+    if isinstance(backend, SiftPredictor):
+        for sample in tqdm(samples, desc="Caching test SIFT features", unit="image"):
+            backend.cache_features(
+                ImageInput(
+                    data=(manifest_path.parent / sample.image).read_bytes(),
+                    media_type="image/png",
+                )
+            )
     recording = EvaluationRun(
         RunConfig.capture(
             predictor=backend.config,
@@ -329,9 +407,10 @@ def run(
         summarize=score,
         output=output,
     )
-    for index, sample in enumerate(samples, 1):
+    for sample in tqdm(samples, desc="Evaluating SIFT", unit="image"):
         row = EvaluationRecord(id=sample.id, target=sample.target)
         backend.last_metadata = None
+        backend.last_interval = None
         started = time.monotonic()
         try:
             # Backends receive only the photo, never the target.
@@ -341,16 +420,13 @@ def run(
                     media_type="image/png",
                 ),
             )
+            row.prediction_interval = backend.last_interval
             row.status = "ok"
         except Exception as error:
             row.error = f"{type(error).__name__}: {error}"
         row.latency_seconds = time.monotonic() - started
         row.backend_metadata = backend.last_metadata
         recording.record(row)
-        print(
-            f"[{index}/{len(samples)}] {sample.id}: {row.status}",
-            flush=True,
-        )
     print(recording.summary.model_dump_json(indent=2))
     print("Results: " + str(recording.output.resolve()))
     raise typer.Exit(1 if recording.summary.failed else 0)

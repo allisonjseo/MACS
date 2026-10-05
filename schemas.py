@@ -16,6 +16,24 @@ class Nutrition(BaseModel):
     fat_g: NonnegativeNumber
 
 
+class NutritionInterval(BaseModel):
+    """A range for each nutrient, in the same units as Nutrition."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    lower: Nutrition
+    upper: Nutrition
+
+    @model_validator(mode="after")
+    def ordered_bounds(self):
+        if any(
+            getattr(self.lower, field) > getattr(self.upper, field)
+            for field in Nutrition.model_fields
+        ):
+            raise ValueError("Interval lower bounds must not exceed upper bounds")
+        return self
+
+
 FIELDS = tuple(Nutrition.model_fields)
 SCHEMA = Nutrition.model_json_schema()
 
@@ -87,12 +105,16 @@ class EvaluationRecord(BaseModel):
     status: Literal["ok", "error"] = "error"
     latency_seconds: NonnegativeNumber = 0.0
     prediction: Nutrition | None = None
+    prediction_interval: NutritionInterval | None = None
     error: str | None = None
     backend_metadata: Any = None
 
 
 class Metric(BaseModel):
     mae: NonnegativeNumber | None = None
+    interval_count: int = 0
+    interval_coverage_percent: NonnegativeNumber | None = None
+    mean_interval_width: NonnegativeNumber | None = None
 
 
 class CalorieAccuracy(BaseModel):

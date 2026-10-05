@@ -5,7 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import cv2
 import numpy as np
@@ -23,6 +23,7 @@ from schemas import (
     ImageInput,
     Manifest,
     Nutrition,
+    NutritionInterval,
     Sample,
 )
 
@@ -98,6 +99,9 @@ def test_sift_retrieves_identical_training_image_and_records_neighbor():
     )
     assert predictor.predict(feature_image(1)) == target
     assert predictor.last_metadata["neighbors"][0]["id"] == "dish_match"
+    assert predictor.last_interval is not None
+    assert predictor.last_interval.lower.calories_kcal == 450
+    assert predictor.last_interval.upper.calories_kcal == 750
 
 
 def test_sift_uses_training_mean_when_photo_has_no_features():
@@ -113,6 +117,72 @@ def test_sift_uses_training_mean_when_photo_has_no_features():
         == fallback
     )
     assert predictor.last_metadata["neighbors"] == []
+    assert predictor.last_interval is not None
+    assert predictor.last_interval.lower.calories_kcal < 321
+    assert predictor.last_interval.upper.calories_kcal > 321
+
+
+def test_sift_interval_uses_weighted_neighbor_spread():
+    predictor = SiftPredictor(
+        [
+            ("first", feature_image(1), nutrients(100)),
+            ("second", feature_image(2), nutrients(300)),
+        ],
+        fallback=nutrients(200),
+        neighbors=2,
+    )
+    with patch.object(
+        predictor.index_matcher, "global_matches", return_value={0: 3, 1: 1}
+    ):
+        prediction = predictor.predict(feature_image(1))
+    neighbors = predictor.last_metadata["neighbors"]
+    weights = {item["id"]: item["similarity"] for item in neighbors}
+    first, second = weights["first"], weights["second"]
+    expected = (first * 100 + second * 300) / (first + second)
+    spread = (
+        (first * (100 - expected) ** 2 + second * (300 - expected) ** 2)
+        / (first + second)
+    ) ** 0.5
+    assert prediction.calories_kcal == pytest.approx(expected)
+    assert predictor.last_interval is not None
+    assert predictor.last_interval.lower.calories_kcal == pytest.approx(
+        max(0, expected - max(spread, 0.25 * expected, 50))
+    )
+    assert predictor.last_interval.upper.calories_kcal == pytest.approx(
+        expected + max(spread, 0.25 * expected, 50)
+    )
+
+
+def test_interval_bounds_and_scoring():
+    with pytest.raises(ValueError, match="lower bounds"):
+        NutritionInterval(lower=nutrients(10), upper=nutrients(5))
+    interval = NutritionInterval(lower=nutrients(0), upper=nutrients(100))
+    rows = [
+        EvaluationRecord(
+            id="inside",
+            status="ok",
+            prediction=nutrients(50),
+            prediction_interval=interval,
+            target=nutrients(100),
+        ),
+        EvaluationRecord(
+            id="outside",
+            status="ok",
+            prediction=nutrients(50),
+            prediction_interval=interval,
+            target=nutrients(200),
+        ),
+        EvaluationRecord(
+            id="point-only",
+            status="ok",
+            prediction=nutrients(50),
+            target=nutrients(50),
+        ),
+    ]
+    metric = evaluation.score(rows).metrics["calories_kcal"]
+    assert metric.interval_count == 2
+    assert metric.interval_coverage_percent == 50
+    assert metric.mean_interval_width == 100
 
 
 def test_cli_runs_sift_with_training_reference(tmp_path: Path):

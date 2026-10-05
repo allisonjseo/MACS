@@ -58,3 +58,5 @@ coverage.xml
 # Downloaded evaluation data and run artifacts
 /data/
 /runs/
+data
+runs

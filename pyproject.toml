@@ -10,7 +10,9 @@ dependencies = [
     "opencv-python-headless>=4.10.0.84",
     "polars>=1.44.2",
     "pydantic>=2.13.5",
+    "tqdm>=4.67.1",
     "typer>=0.27.2",
+    "torch>=2.5.0",
 ]
 
 [tool.uv]
