@@ -7,13 +7,15 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import cv2
+import numpy as np
 import pytest
 from openai_codex import ApprovalMode, LocalImageInput, Sandbox, TextInput, TurnResult
 from openai_codex.generated.v2_all import ThreadItem, TurnStatus
 from typer.testing import CliRunner
 
 import eval as evaluation
-from predictors import CodexPredictor
+from predictors import CodexPredictor, SiftPredictor
 from schemas import (
     FIELDS,
     SCHEMA,
@@ -29,6 +31,15 @@ def nutrients(calories: float, protein: float = 10, carbs: float = 20, fat: floa
     return Nutrition(
         calories_kcal=calories, protein_g=protein, carbs_g=carbs, fat_g=fat
     )
+
+
+def feature_image(seed: int) -> ImageInput:
+    """Return a deterministic, textured PNG that yields SIFT descriptors."""
+    generator = np.random.default_rng(seed)
+    pixels = generator.integers(0, 256, size=(180, 180), dtype=np.uint8)
+    ok, encoded = cv2.imencode(".png", pixels)
+    assert ok
+    return ImageInput(data=encoded.tobytes(), media_type="image/png")
 
 
 def test_metadata_column_order_with_variable_ingredients(tmp_path: Path):
@@ -48,6 +59,117 @@ def test_validation_rejects_missing_and_extra_fields():
         Nutrition.model_validate({"calories_kcal": 10})
     with pytest.raises(ValueError):
         Nutrition.model_validate(dict(nutrients(10).model_dump(), explanation="guess"))
+
+
+def test_manifest_references_must_be_disjoint_from_test_samples():
+    sample = {
+        "id": "dish_1",
+        "image": "food.png",
+        "image_sha256": "0" * 64,
+        "target": nutrients(100),
+    }
+    with pytest.raises(ValueError, match="must not overlap"):
+        Manifest.model_validate(
+            {
+                "dataset": "Nutrition5k",
+                "source": "test",
+                "license": "CC BY 4.0",
+                "split": "rgb_test",
+                "seed": 42,
+                "n": 1,
+                "missing_overhead_images": [],
+                "training_mean": nutrients(100),
+                "training_label_count": 1,
+                "samples": [sample],
+                "references": [sample],
+            }
+        )
+
+
+def test_sift_retrieves_identical_training_image_and_records_neighbor():
+    target = nutrients(600, protein=30, carbs=60, fat=20)
+    predictor = SiftPredictor(
+        [
+            ("dish_match", feature_image(1), target),
+            ("dish_other", feature_image(2), nutrients(100)),
+        ],
+        fallback=nutrients(300),
+        neighbors=1,
+    )
+    assert predictor.predict(feature_image(1)) == target
+    assert predictor.last_metadata["neighbors"][0]["id"] == "dish_match"
+
+
+def test_sift_uses_training_mean_when_photo_has_no_features():
+    blank = np.zeros((100, 100), dtype=np.uint8)
+    ok, encoded = cv2.imencode(".png", blank)
+    assert ok
+    fallback = nutrients(321)
+    predictor = SiftPredictor(
+        [("dish_reference", feature_image(1), nutrients(500))], fallback
+    )
+    assert (
+        predictor.predict(ImageInput(data=encoded.tobytes(), media_type="image/png"))
+        == fallback
+    )
+    assert predictor.last_metadata["neighbors"] == []
+
+
+def test_cli_runs_sift_with_training_reference(tmp_path: Path):
+    test_image = feature_image(1).data
+    reference_image = feature_image(1).data
+    (tmp_path / "test.png").write_bytes(test_image)
+    (tmp_path / "reference.png").write_bytes(reference_image)
+    reference_target = nutrients(600, protein=30, carbs=60, fat=20)
+    manifest = Manifest(
+        dataset="Nutrition5k",
+        source="test",
+        license="CC BY 4.0",
+        split="rgb_test",
+        seed=42,
+        n=1,
+        missing_overhead_images=[],
+        training_mean=nutrients(100),
+        training_label_count=1,
+        samples=[
+            Sample(
+                id="test_dish",
+                image="test.png",
+                image_sha256=hashlib.sha256(test_image).hexdigest(),
+                target=nutrients(200),
+            )
+        ],
+        references=[
+            Sample(
+                id="training_dish",
+                image="reference.png",
+                image_sha256=hashlib.sha256(reference_image).hexdigest(),
+                target=reference_target,
+            )
+        ],
+    )
+    (tmp_path / "manifest.json").write_text(manifest.model_dump_json())
+    output = tmp_path / "sift-results"
+    result = CliRunner().invoke(
+        evaluation.app,
+        [
+            "run",
+            "--data-dir",
+            str(tmp_path),
+            "--predictor",
+            "sift",
+            "--sift-neighbors",
+            "1",
+            "--output",
+            str(output),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    config = json.loads((output / "config.json").read_text())
+    assert config["predictor"]["backend"] == "sift"
+    records = json.loads((output / "predictions.json").read_text())
+    assert records[0]["prediction"] == reference_target.model_dump(mode="json")
+    assert records[0]["backend_metadata"]["neighbors"][0]["id"] == "training_dish"
 
 
 def test_metrics_and_failures():
@@ -221,6 +343,7 @@ def test_prepare_keeps_test_labels_out_of_training_baseline(
         "metadata/dish_metadata_cafe2.csv": b"",
         "dish_ids/splits/rgb_train_ids.txt": b"dish_1\n",
         "dish_ids/splits/rgb_test_ids.txt": b"dish_2\n",
+        "imagery/realsense_overhead/dish_1/rgb.png": b"\x89PNG\r\n\x1a\nimage",
         "imagery/realsense_overhead/dish_2/rgb.png": b"\x89PNG\r\n\x1a\nimage",
     }
 
@@ -229,10 +352,12 @@ def test_prepare_keeps_test_labels_out_of_training_baseline(
         destination.write_bytes(files[relative])
 
     monkeypatch.setattr("eval.download", fake_download)
-    evaluation.prepare(data_dir=tmp_path, n=1, seed=42)
+    evaluation.prepare(data_dir=tmp_path, n=1, reference_n=1, seed=42)
     manifest = Manifest.model_validate_json((tmp_path / "manifest.json").read_text())
     assert manifest.training_mean == nutrients(100)
     assert manifest.samples[0].target == nutrients(400, 30, 45, 12)
+    assert manifest.references[0].id == "dish_1"
+    assert manifest.references[0].target == nutrients(100)
 
 
 @pytest.mark.parametrize(

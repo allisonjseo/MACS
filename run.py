@@ -86,9 +86,11 @@ class RunConfig(BaseModel):
             dependencies={
                 name: version(name)
                 for name in (
+                    "numpy",
                     "pydantic",
                     "polars",
                     "openai-codex",
+                    "opencv-python-headless",
                     "typer",
                 )
             },

@@ -42,6 +42,8 @@ class Manifest(BaseModel):
     training_mean: Nutrition
     training_label_count: int = Field(gt=0)
     samples: list[Sample]
+    references: list[Sample] = Field(default_factory=list)
+    missing_reference_images: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def consistent_sample_count(self):
@@ -49,6 +51,12 @@ class Manifest(BaseModel):
             raise ValueError("Manifest sample count does not match n")
         if len({sample.id for sample in self.samples}) != self.n:
             raise ValueError("Manifest sample IDs must be unique")
+        sample_ids = {sample.id for sample in self.samples}
+        reference_ids = {sample.id for sample in self.references}
+        if len(reference_ids) != len(self.references):
+            raise ValueError("Manifest reference IDs must be unique")
+        if sample_ids & reference_ids:
+            raise ValueError("Test samples and training references must not overlap")
         return self
 
 

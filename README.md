@@ -12,6 +12,8 @@ JSON is used at the persistence and model-response boundaries.
 uv sync --locked
 uv run eval.py prepare --n 20 --seed 42
 uv run eval.py run --predictor mean
+uv run eval.py prepare --data-dir data/nutrition5k-sift --n 200 --reference-n 500 --seed 42
+uv run eval.py run --data-dir data/nutrition5k-sift --predictor sift
 uv run eval.py run --predictor codex --model gpt-6.1-sol
 ```
 
@@ -26,15 +28,27 @@ Preparation downloads the official RGB train/test ID lists, dish metadata, and
 only the requested test photographs. It shuffles sorted test IDs using the seed,
 skips missing overhead images (404s), and saves the selected IDs, image checksums,
 labels, and skipped IDs in `data/nutrition5k/manifest.json`. Training labels are
-used solely to compute the fixed mean baseline. An existing manifest is never
-silently replaced; use another `--data-dir` to prepare a different subset.
+used solely to compute the fixed mean baseline unless `--reference-n` is set.
+An existing manifest is never silently replaced; use another `--data-dir` to
+prepare a different subset.
+
+Pass `--reference-n` to additionally download that many labeled photos from the
+official RGB training split. This enables the `sift` predictor, a classical
+computer-vision retrieval baseline: it extracts SIFT keypoints from the test
+photo, finds training photos with the most unambiguous descriptor matches, then
+returns their similarity-weighted nutrition average. It never uses test labels
+while predicting and falls back to the full training-label mean if no descriptors
+match. `--sift-neighbors`, `--sift-ratio-threshold`, and `--sift-max-features`
+are recorded in the run configuration; tune them on a held-out part of the
+training split, not on the test subset.
 
 The CLI uses Typer; run `uv run eval.py --help` to see commands and options.
 
 Every backend implements the same `predict(image) -> Nutrition` contract in
 `predictors.py`. Dataset loading, output validation, and metrics live in `eval.py`.
 `run.py` captures run configuration and provenance and serializes all run artifacts.
-The included backends are `codex` and `mean` (training-set mean). Both inherit
+The included backends are `codex`, `mean` (training-set mean), and `sift`
+(SIFT training-image retrieval). All inherit
 `Predictor`, a small shared interface in `predictors.py`. Pydantic data contracts
 are in `schemas.py`. The image is an `ImageInput` containing encoded image bytes
 (`data`) and a MIME type (`media_type`). The Codex adapter writes its own temporary

@@ -23,6 +23,7 @@ from predictors import (
     CodexPredictor,
     MeanPredictor,
     Predictor,
+    SiftPredictor,
 )
 from run import EvaluationRun, RunConfig, write_json
 from schemas import (
@@ -45,6 +46,7 @@ app = typer.Typer(no_args_is_help=True, help=__doc__)
 class Backend(StrEnum):
     codex = "codex"
     mean = "mean"
+    sift = "sift"
 
 
 def download(relative, destination):
@@ -82,6 +84,13 @@ def prepare(
         "data/nutrition5k"
     ),
     n: Annotated[int, typer.Option(min=1)] = 20,
+    reference_n: Annotated[
+        int,
+        typer.Option(
+            min=0,
+            help="Number of labeled RGB training images to cache for SIFT retrieval",
+        ),
+    ] = 0,
     seed: Annotated[int, typer.Option()] = 42,
 ):
     """Download a reproducible small test subset."""
@@ -143,6 +152,34 @@ def prepare(
             break
     if len(samples) != n:
         raise ValueError(f"Only {len(samples)} test images available")
+    reference_candidates = sorted(splits["train"] & labels.keys())
+    random.Random(seed + 1).shuffle(reference_candidates)
+    references, missing_references = [], []
+    for dish in reference_candidates:
+        if len(references) == reference_n:
+            break
+        relative = f"imagery/realsense_overhead/{dish}/rgb.png"
+        image = root / "references" / (dish + ".png")
+        try:
+            download(relative, image)
+        except HTTPError as error:
+            if error.code != 404:
+                raise
+            missing_references.append(dish)
+            continue
+        references.append(
+            Sample(
+                id=dish,
+                image=str(image.relative_to(root)),
+                image_sha256=hashlib.sha256(image.read_bytes()).hexdigest(),
+                target=labels[dish],
+            )
+        )
+        print(
+            f"Downloaded reference {len(references)}/{reference_n}: {dish}", flush=True
+        )
+    if len(references) != reference_n:
+        raise ValueError(f"Only {len(references)} training reference images available")
     manifest = Manifest(
         dataset="Nutrition5k",
         source=SOURCE,
@@ -154,6 +191,8 @@ def prepare(
         training_mean=means,
         training_label_count=len(train),
         samples=samples,
+        references=references,
+        missing_reference_images=missing_references,
     )
     write_json(manifest_path, manifest)
     print("Prepared " + str(manifest_path))
@@ -223,6 +262,16 @@ def run(
     prompt_file: Annotated[
         Path | None, typer.Option(help="Override the Codex prompt")
     ] = None,
+    sift_neighbors: Annotated[
+        int, typer.Option(min=1, help="Number of SIFT retrieval neighbors")
+    ] = 5,
+    sift_ratio_threshold: Annotated[
+        float,
+        typer.Option(min=0.01, max=0.99, help="Lowe ratio threshold for SIFT matches"),
+    ] = 0.75,
+    sift_max_features: Annotated[
+        int, typer.Option(min=1, help="Maximum SIFT descriptors per image")
+    ] = 500,
     output: Annotated[
         Path | None, typer.Option(help="New directory for this run")
     ] = None,
@@ -235,7 +284,7 @@ def run(
     if limit:
         samples = samples[:limit]
     # Validate everything before launching any potentially paid inference.
-    for sample in samples:
+    for sample in [*samples, *manifest.references]:
         image = manifest_path.parent / sample.image
         if hashlib.sha256(image.read_bytes()).hexdigest() != sample.image_sha256:
             raise ValueError("Image checksum mismatch: " + sample.id)
@@ -246,8 +295,30 @@ def run(
             if prompt_file
             else CodexPredictor(model, timeout)
         )
-    else:
+    elif predictor == "mean":
         backend = MeanPredictor(manifest.training_mean)
+    else:
+        if not manifest.references:
+            raise ValueError(
+                "SIFT predictor needs training references; run prepare with --reference-n"
+            )
+        backend = SiftPredictor(
+            [
+                (
+                    reference.id,
+                    ImageInput(
+                        data=(manifest_path.parent / reference.image).read_bytes(),
+                        media_type="image/png",
+                    ),
+                    reference.target,
+                )
+                for reference in manifest.references
+            ],
+            manifest.training_mean,
+            neighbors=sift_neighbors,
+            ratio_threshold=sift_ratio_threshold,
+            max_features=sift_max_features,
+        )
     recording = EvaluationRun(
         RunConfig.capture(
             predictor=backend.config,
