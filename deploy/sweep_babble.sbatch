@@ -7,4 +7,8 @@ export HF_HOME="$PWD/../cache/huggingface"
 export TORCH_HOME="$PWD/../cache/torch"
 export TORCHINDUCTOR_CACHE_DIR="$PWD/../cache/inductor/sweep-$SLURM_JOB_ID"
 export WANDB_CACHE_DIR="$PWD/../cache/wandb"
-exec .venv/bin/python sweep.py run "$2" "$4" "$1" "$3"
+resume=()
+if [[ -f "$3/plan.json" ]]; then
+    resume=(--resume)
+fi
+exec .venv/bin/python sweep.py run "$2" "$4" "$1" "$3" "${resume[@]}"

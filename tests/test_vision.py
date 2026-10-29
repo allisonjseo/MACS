@@ -520,3 +520,88 @@ def test_pruned_training_finalizes_logs_and_saves_calorie_selected_checkpoint(
     assert len((output / "metrics.jsonl").read_text().splitlines()) == 2
     with pytest.raises(ValueError, match="requires Gaussian"):
         TrainConfig(backbone="resnet", selection_metric="calorie_nll")
+
+
+@pytest.mark.parametrize("repair_append", [False, True])
+def test_epoch_resume_matches_uninterrupted_adam_dropout_and_shuffle(
+    tmp_path, monkeypatch, repair_append
+):
+    monkeypatch.setattr("timm.create_model", lambda *a, **kw: TinyBackbone())
+    monkeypatch.setattr(
+        train, "model_data_config", lambda c: resolve_model_data_config(TinyBackbone())
+    )
+    data = TrainingManifest(
+        seed=42,
+        validation_fraction=0.2,
+        train=[sample(tmp_path, f"train{i}", 80 + i * 25) for i in range(6)],
+        validation=[sample(tmp_path, "val", 175)],
+        missing_overhead_images=[],
+        missing_labels=[],
+        official_test_ids=["test"],
+    )
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(data.model_dump_json())
+    reference = Path("configs/resnet-gaussian.toml")
+    overrides = [
+        "device=cpu",
+        "pretrained=false",
+        "compile_backend=eager",
+        "workers=0",
+        "epochs=3",
+        "hidden_dim=8",
+        "batch_size=2",
+        "dropout=0.25",
+        "wandb_mode=disabled",
+        "selection_metric=calorie_nll",
+    ]
+    full = tmp_path / "full"
+    train.run_training(reference, manifest, full, overrides)
+    split = tmp_path / "split"
+
+    def interrupt(row):
+        if row["epoch"] == 2:
+            raise InterruptedError("simulated preemption after committed epoch")
+        return False
+
+    with pytest.raises(InterruptedError):
+        train.run_training(
+            reference, manifest, split, overrides, epoch_callback=interrupt
+        )
+    if repair_append:
+        rows = (split / "metrics.jsonl").read_text().splitlines()
+        (split / "metrics.jsonl").write_text(rows[0] + '\n{"epoch":2')
+        (
+            split / "best.pt"
+        ).unlink()  # Crash after last.pt commit, before publishing best.
+    summary = train.run_training(reference, manifest, split, overrides, resume=True)
+    a = torch.load(full / "last.pt", weights_only=True)
+    b = torch.load(split / "last.pt", weights_only=True)
+    assert all(torch.equal(a["model"][k], b["model"][k]) for k in a["model"])
+    for key, value in a["training_state"]["optimizer"]["state"].items():
+        assert all(
+            torch.equal(v, b["training_state"]["optimizer"]["state"][key][k])
+            for k, v in value.items()
+        )
+    assert a["training_state"]["scheduler"] == b["training_state"]["scheduler"]
+    assert summary["resumes"] == 1 and summary["epochs"] == 3
+    rows = [
+        json.loads(line) for line in (split / "metrics.jsonl").read_text().splitlines()
+    ]
+    baseline = [
+        json.loads(line) for line in (full / "metrics.jsonl").read_text().splitlines()
+    ]
+    assert [row["epoch"] for row in rows] == [1, 2, 3]
+    assert [row["validation"]["nll"] for row in rows] == [
+        row["validation"]["nll"] for row in baseline
+    ]
+    assert [row["learning_rates"] for row in rows] == [
+        row["learning_rates"] for row in baseline
+    ]
+    assert (split / "best.pt").is_file()
+    assert len(list(split.glob(".best-epoch-*.pt"))) == 1
+    if repair_append:
+        assert rows[1]["timing"]["checkpoint_seconds"] is None
+    with pytest.raises(ValueError, match="config differs"):
+        train.run_training(
+            reference, manifest, split, [*overrides, "head_lr=0.002"], resume=True
+        )

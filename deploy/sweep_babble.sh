@@ -13,7 +13,7 @@ mkdir -p "$output/logs"
 for backbone in resnet swin dino; do
     sbatch --parsable --account=agu --partition=preempt --qos=preempt_qos \
         --gres=gpu:1 --constraint=L40S --ntasks=1 --cpus-per-task=4 --mem=16G \
-        --time=02:00:00 --no-requeue --job-name="macs-optuna-$backbone" \
+        --time=02:00:00 --requeue --open-mode=append --job-name="macs-optuna-$backbone" \
         --chdir="$PWD" --output="$output/logs/%j.out" --error="$output/logs/%j.err" \
         deploy/sweep_babble.sbatch "$manifest" "$plan" "$output/$backbone" "$backbone"
 done

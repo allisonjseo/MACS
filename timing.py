@@ -9,11 +9,15 @@ def phase_timer(name: str) -> Timer:
     return Timer(name=name, logger=None)
 
 
-def estimate_runtime(epoch_seconds: list[float], epochs: int, elapsed_seconds: float):
+def estimate_runtime(
+    epoch_seconds: list[float | None], epochs: int, elapsed_seconds: float
+):
     """Use the median of up to five recent epochs, excluding the first warm-up."""
-    if not epoch_seconds:
+    valid = [value for value in epoch_seconds if value is not None]
+    if not valid:
         return {}
-    recent = (epoch_seconds[1:] or epoch_seconds)[-5:]
+    recent = [value for value in epoch_seconds[1:] if value is not None] or valid
+    recent = recent[-5:]
     remaining = max(0, epochs - len(epoch_seconds))
     typical = median(recent)
     return {

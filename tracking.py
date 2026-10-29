@@ -15,11 +15,21 @@ def configure_metrics(run):
 
 
 @contextmanager
-def wandb_session(settings: TrainConfig, config: dict[str, Any], output: Path):
+def wandb_session(
+    settings: TrainConfig, config: dict[str, Any], output: Path, *, resume=False
+):
     if settings.wandb_mode == "disabled":
         yield None
         return
+    import json
+
     import wandb
+
+    identity = (
+        json.loads((output / "wandb.json").read_text())
+        if resume and (output / "wandb.json").exists()
+        else {}
+    )
 
     # Use an explicit mode; failure to connect must not silently disable logging.
     with wandb.init(
@@ -29,6 +39,8 @@ def wandb_session(settings: TrainConfig, config: dict[str, Any], output: Path):
         name=output.name,
         job_type="train",
         mode=settings.wandb_mode,
+        id=identity.get("id"),
+        resume="allow" if resume and settings.wandb_mode == "online" else None,
         config=config,
         dir=str(output.resolve()),
         settings=wandb.Settings(init_timeout=60),

@@ -2,6 +2,7 @@
 """Plan exact, matched Optuna trials, then execute one frozen-backbone study."""
 
 import csv
+import fcntl
 import gc
 import hashlib
 import json
@@ -24,6 +25,7 @@ PROJECT = Path(__file__).resolve().parent
 SOURCES = (
     "sweep.py",
     "train.py",
+    "checkpointing.py",
     "vision.py",
     "vision_data.py",
     "tracking.py",
@@ -139,8 +141,8 @@ def plan(
     print(json.dumps(chosen, indent=2))
 
 
-def pruning_callback(trial, protocol):
-    best = math.inf
+def pruning_callback(trial, protocol, initial_best=math.inf):
+    best = initial_best
 
     def after_epoch(row):
         nonlocal best
@@ -149,12 +151,30 @@ def pruning_callback(trial, protocol):
             raise FloatingPointError("Non-finite calorie validation NLL")
         best = min(best, score)
         epoch = row["epoch"]
-        trial.report(best, step=epoch)
+        frozen = trial.study.trials[trial.number]
+        if epoch in frozen.intermediate_values:
+            if not math.isclose(
+                frozen.intermediate_values[epoch], best, rel_tol=1e-12, abs_tol=1e-12
+            ):
+                raise ValueError(
+                    "Resumed validation score disagrees with Optuna history"
+                )
+        else:
+            trial.report(best, step=epoch)
         if epoch not in protocol["pruning_epochs"]:
             return False
+        key = f"prune_at_epoch_{epoch}"
+        if key in frozen.user_attrs:
+            return frozen.user_attrs[key]
+        rung = protocol["pruning_epochs"].index(epoch)
+        if f"completed_rung_{rung}" in frozen.system_attrs:
+            raise ValueError(
+                "Interrupted while persisting a pruning decision; manual inspection required"
+            )
         prune = trial.should_prune()
         # Trial zero is the full-budget reference; it still populates rung scores.
         decision = prune and not trial.user_attrs.get("reference_trial", False)
+        trial.set_user_attr(key, decision)
         print(
             json.dumps(
                 {
@@ -219,8 +239,93 @@ def export_study(study, output, started):
 
 
 @app.command()
-def run(plan_file: Path, backbone: str, manifest: Path, output: Path):
-    """Execute a fresh study from a reviewed immutable plan; no automatic restarts."""
+def refresh_plan(plan_file: Path, output: Path):
+    """Explicitly migrate source provenance, preserving every reviewed setting/proposal."""
+    if output.exists():
+        raise ValueError("Migration output already exists")
+    chosen = json.loads(plan_file.read_text())
+    for entry in chosen["studies"].values():
+        reference = PROJECT / entry["reference"]
+        if sha256(reference) != entry["reference_sha256"]:
+            raise ValueError(
+                "Reference changed; migration must not change training settings"
+            )
+        for proposal in entry["trials"]:
+            resolved, _ = load_config(reference, overrides_for(proposal["overrides"]))
+            if resolved.model_dump(mode="json") != proposal["train_config"]:
+                raise ValueError(
+                    "Proposal changed; migration must not change training settings"
+                )
+    chosen["source_migration"] = {
+        "previous_plan_sha256": sha256(plan_file),
+        "previous_sources": chosen["sources"],
+        "reason": "full-state epoch checkpoints and study resume; no training/pruning parameter changes",
+    }
+    chosen["sources"] = {name: sha256(PROJECT / name) for name in SOURCES}
+    save_json(output, chosen)
+    print(
+        json.dumps(
+            {
+                "plan": str(output),
+                "sha256": sha256(output),
+                "changes_to_training_config": {},
+            },
+            indent=2,
+        )
+    )
+
+
+def drive_study(study, objective, output, started, expected_trials):
+    """Resume an interrupted RUNNING trial before asking for the next queued trial."""
+    try:
+        while True:
+            trials = study.trials
+            if len(trials) != expected_trials:
+                raise ValueError("Study trial count differs from reviewed plan")
+            if any(t.state == TrialState.FAIL for t in trials):
+                raise ValueError(
+                    "Study contains a failed trial; inspect it instead of silently retrying"
+                )
+            running = [t for t in trials if t.state == TrialState.RUNNING]
+            if len(running) > 1:
+                raise ValueError("Multiple RUNNING trials in a serial study")
+            if running:
+                trial = optuna.trial.Trial(study, running[0]._trial_id)
+            elif any(t.state == TrialState.WAITING for t in trials):
+                trial = study.ask()
+            else:
+                break
+            try:
+                value = objective(trial)
+            except optuna.TrialPruned:
+                study.tell(trial, state=TrialState.PRUNED)
+            except (KeyboardInterrupt, SystemExit):
+                raise  # Keep RUNNING: a recovery process reconnects to this same ID.
+            except Exception:
+                study.tell(trial, state=TrialState.FAIL)
+                raise
+            else:
+                study.tell(trial, value)
+            export_study(study, output, started)
+    finally:
+        export_study(study, output, started)
+
+
+@app.command()
+def run(
+    plan_file: Path, backbone: str, manifest: Path, output: Path, resume: bool = False
+):
+    """Run/resume the same reviewed serial study; protect it from concurrent controllers."""
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with (output.parent / f".{output.name}.controller.lock").open("a+") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise ValueError("Another controller owns this study") from error
+        execute_study(plan_file, backbone, manifest, output, resume)
+
+
+def execute_study(plan_file, backbone, manifest, output, resume):
     chosen = json.loads(plan_file.read_text())
     settings = chosen["protocol"]
     entry = chosen["studies"][backbone]
@@ -232,9 +337,27 @@ def run(plan_file: Path, backbone: str, manifest: Path, output: Path):
     reference = PROJECT / entry["reference"]
     if sha256(reference) != entry["reference_sha256"]:
         raise ValueError("Reference configuration changed since planning")
-    if output.exists():
+    if output.exists() and any(output.iterdir()) and not resume:
         raise ValueError("Output exists; refusing to restart or overwrite a study")
-    output.mkdir(parents=True)
+    if resume:
+        recorded = json.loads((output / "plan.json").read_text())
+        if (
+            recorded["protocol"] != chosen["protocol"]
+            or recorded["studies"] != chosen["studies"]
+        ):
+            raise ValueError(
+                "Resumed study settings or proposals differ from original plan"
+            )
+        if sha256(output / "plan.json") != sha256(plan_file):
+            if chosen.get("source_migration", {}).get("previous_plan_sha256") != sha256(
+                output / "plan.json"
+            ):
+                raise ValueError(
+                    "Source migration is not linked to the original study plan"
+                )
+            save_json(output / "plan-before-checkpointing.json", recorded)
+    else:
+        output.mkdir(parents=True, exist_ok=True)
     save_json(output / "plan.json", chosen)
     study = optuna.create_study(
         study_name=f"gaussian-pilot-{backbone}",
@@ -247,10 +370,20 @@ def run(plan_file: Path, backbone: str, manifest: Path, output: Path):
             min_early_stopping_rate=0,
             bootstrap_count=0,
         ),
+        load_if_exists=resume,
     )
-    for proposal in entry["trials"]:
+    existing = study.trials
+    for recorded in existing:
+        proposal = entry["trials"][recorded.number]
+        for key, value in recorded.params.items():
+            if proposal["params"].get(key) != value:
+                raise ValueError("Persisted trial parameters differ from reviewed plan")
+        if recorded.system_attrs.get("fixed_params") != proposal["params"]:
+            raise ValueError("Persisted queued parameters differ from reviewed plan")
+    for proposal in entry["trials"][len(existing) :]:
         study.enqueue_trial(
-            proposal["params"], user_attrs={"reference_trial": proposal["number"] == 0}
+            proposal["params"],
+            user_attrs={"reference_trial": proposal["number"] == 0},
         )
     started = time.perf_counter()
 
@@ -265,6 +398,21 @@ def run(plan_file: Path, backbone: str, manifest: Path, output: Path):
             raise ValueError("Resolved settings differ from reviewed proposal")
         trial_output = output / f"trial-{trial.number:03d}"
         trial.set_user_attr("output", str(trial_output))
+        if (trial_output / "summary.json").exists():
+            summary = json.loads((trial_output / "summary.json").read_text())
+            if summary["stopped_early"]:
+                raise optuna.TrialPruned("Recover finalized pruned trial")
+            return summary["best_selection_score"]
+        initial_best = math.inf
+        if (trial_output / "last.pt").exists():
+            checkpoint = torch.load(
+                trial_output / "last.pt", map_location="cpu", weights_only=True
+            )
+            if "training_state" not in checkpoint:
+                raise ValueError("Legacy weights-only trial cannot faithfully resume")
+            initial_best = checkpoint["training_state"]["progress"].get(
+                "best", math.inf
+            )
         summary = None
         try:
             summary = run_training(
@@ -272,7 +420,8 @@ def run(plan_file: Path, backbone: str, manifest: Path, output: Path):
                 manifest,
                 trial_output,
                 overrides,
-                epoch_callback=pruning_callback(trial, settings),
+                epoch_callback=pruning_callback(trial, settings, initial_best),
+                resume=trial_output.exists(),
                 experiment_metadata={
                     "study": study.study_name,
                     "trial": trial.number,
@@ -298,15 +447,7 @@ def run(plan_file: Path, backbone: str, manifest: Path, output: Path):
             raise optuna.TrialPruned(f"Stopped at epoch {summary['epochs']}")
         return summary["best_selection_score"]
 
-    try:
-        study.optimize(
-            objective,
-            n_trials=settings["trials_per_backbone"],
-            n_jobs=1,
-            callbacks=[lambda study, trial: export_study(study, output, started)],
-        )
-    finally:
-        export_study(study, output, started)
+    drive_study(study, objective, output, started, settings["trials_per_backbone"])
 
 
 if __name__ == "__main__":

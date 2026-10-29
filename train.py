@@ -20,6 +20,14 @@ from torch import nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+from checkpointing import (
+    atomic_checkpoint,
+    publish_best,
+    read_history,
+    recover_history,
+    restore_rng,
+    rng_state,
+)
 from determinism import configure_determinism
 from run import PROJECT_DIR, GitRevision
 from timing import estimate_runtime, phase_timer
@@ -230,9 +238,10 @@ def fit(
         typer.Option("--set", help="Explicit key=value override; repeatable"),
     ] = None,
     dry_run: bool = False,
+    resume: bool = False,
 ):
     """Print the exact resolved configuration, then train (or only print with --dry-run)."""
-    return run_training(config, manifest, output, overrides, dry_run)
+    return run_training(config, manifest, output, overrides, dry_run, resume=resume)
 
 
 def run_training(
@@ -244,6 +253,7 @@ def run_training(
     *,
     epoch_callback: Callable[[dict[str, Any]], bool] | None = None,
     experiment_metadata: dict[str, Any] | None = None,
+    resume: bool = False,
 ):
     """Train with an optional post-epoch stop callback; always finalize stopped runs."""
     fit_started = time.perf_counter()
@@ -286,13 +296,45 @@ def run_training(
             "gpu_count": 1 if settings.device.startswith("cuda") else 0,
             "hostname": platform.node(),
         },
+        "checkpoint_policy": "atomic full training state after every completed epoch; resume repeats only an unfinished epoch",
+        "resume": resume,
     }
     if experiment_metadata is not None:
         chosen["experiment"] = experiment_metadata
     print(json.dumps(chosen, indent=2), flush=True)
     if dry_run:
         return
-    if output.exists():
+    saved = None
+    if resume:
+        original = json.loads((output / "config.json").read_text())
+        if original["train_config"] != settings.model_dump(mode="json"):
+            raise ValueError("Resolved training config differs from the original run")
+        if original["manifest_sha256"] != chosen["manifest_sha256"] or original[
+            "data_config"
+        ] != json.loads(json.dumps(preprocessing)):
+            raise ValueError(
+                "Resume data or preprocessing differs from the original run"
+            )
+        if (output / "last.pt").exists():
+            saved = torch.load(
+                output / "last.pt", map_location="cpu", weights_only=True
+            )
+        elif read_history(output / "metrics.jsonl"):
+            raise ValueError(
+                "Completed epochs exist but their resume checkpoint is missing"
+            )
+        if saved is not None and "training_state" not in saved:
+            raise ValueError(
+                "Legacy checkpoint has weights only; exact training resume is unavailable"
+            )
+        if saved is not None and (
+            saved["train_config"] != settings.model_dump(mode="json")
+            or saved["manifest_sha256"] != chosen["manifest_sha256"]
+        ):
+            raise ValueError(
+                "Checkpoint config or dataset differs from the requested run"
+            )
+    elif output.exists():
         raise ValueError("Output already exists; use a fresh run directory")
     device = torch.device(settings.device)
     if device.type == "cuda" and not torch.cuda.is_available():
@@ -348,6 +390,22 @@ def run_training(
         optimizer, T_max=settings.epochs
     )
     scaler = torch.amp.GradScaler("cuda", enabled=settings.precision == "float16")
+    history = []
+    progress = {}
+    if saved is not None:
+        state = saved["training_state"]
+        if state["version"] != 1:
+            raise ValueError("Unsupported training checkpoint state")
+        model.load_state_dict(saved["model"])
+        optimizer.load_state_dict(state["optimizer"])
+        scheduler.load_state_dict(state["scheduler"])
+        scaler.load_state_dict(state["scaler"])
+        progress = state["progress"]
+        history = recover_history(output / "metrics.jsonl", state["history"])
+        if len(history) != saved["epoch"]:
+            raise ValueError("Checkpoint epoch and history length differ")
+        if progress["best_checkpoint"] is not None:
+            publish_best(output, progress["best_checkpoint"])
     chosen.update(
         {
             "determinism": determinism.model_dump(),
@@ -385,8 +443,20 @@ def run_training(
     if settings.wandb_mode != "disabled":
         chosen["dependencies"]["wandb"] = version("wandb")
     chosen["dependencies"]["codetiming"] = version("codetiming")
-    output.mkdir(parents=True, exist_ok=False)
-    save_json(output / "config.json", chosen)
+    if not resume:
+        output.mkdir(parents=True, exist_ok=False)
+        save_json(output / "config.json", chosen)
+    else:
+        for name, recorded in original.get("dependencies", {}).items():
+            if (
+                name in chosen["dependencies"]
+                and recorded != chosen["dependencies"][name]
+            ):
+                raise ValueError(
+                    f"Resume dependency differs from the original run: {name}"
+                )
+        chosen["resume_from_epoch"] = saved["epoch"] if saved else 0
+        save_json(output / f"resume-{progress.get('resumes', 0) + 1:04d}.json", chosen)
     print(
         "Runtime and target normalization: "
         + json.dumps(
@@ -397,7 +467,7 @@ def run_training(
         ),
         flush=True,
     )
-    with wandb_session(settings, chosen, output) as wb_run:
+    with wandb_session(settings, chosen, output, resume=resume) as wb_run:
         if wb_run is not None:
             save_json(
                 output / "wandb.json",
@@ -408,16 +478,52 @@ def run_training(
                     "project": wb_run.project,
                 },
             )
+        if saved is None:
+            # Protect the first epoch too; the payload uses only safe primitives/tensors.
+            atomic_checkpoint(
+                output / "last.pt",
+                {
+                    "format_version": 1,
+                    "model": model.state_dict(),
+                    "train_config": settings.model_dump(mode="json"),
+                    "data_config": preprocessing,
+                    "epoch": 0,
+                    "manifest_sha256": chosen["manifest_sha256"],
+                    "training_state": {
+                        "version": 1,
+                        "optimizer": optimizer.state_dict(),
+                        "scheduler": scheduler.state_dict(),
+                        "scaler": scaler.state_dict(),
+                        "rng": rng_state(generator),
+                        "history": [],
+                        "progress": {"best_checkpoint": None},
+                    },
+                },
+            )
         setup_seconds = time.perf_counter() - fit_started
+        setup_seconds += progress.get("setup_seconds", 0)
         training_started = time.perf_counter()
-        epoch_seconds = []
-        best = float("inf")
-        best_validation_loss = None
-        best_epoch = None
-        best_validation_mae = None
-        best_validation_distribution = {}
+        training_offset = (
+            history[-1]["timing"]["elapsed_training_seconds"] if history else 0
+        )
+        total_offset = history[-1]["timing"]["elapsed_total_seconds"] if history else 0
+        epoch_seconds = [row["timing"]["epoch_seconds"] for row in history]
+        best = progress.get("best", float("inf"))
+        best_validation_loss = progress.get("best_validation_loss")
+        best_epoch = progress.get("best_epoch")
+        best_validation_mae = progress.get("best_validation_mae")
+        best_validation_distribution = progress.get("best_validation_distribution", {})
+        best_checkpoint = progress.get("best_checkpoint")
+        resumes = progress.get("resumes", 0) + int(resume)
+        if saved is not None:
+            restore_rng(saved["training_state"]["rng"], generator)
         stopped_early = False
-        for epoch in range(1, settings.epochs + 1):
+        # Reconcile a crash after checkpoint commit but before the Optuna callback.
+        if history and epoch_callback is not None:
+            stopped_early = epoch_callback(history[-1])
+        for epoch in range(len(history) + 1, settings.epochs + 1):
+            if stopped_early:
+                break
             epoch_timer = phase_timer("epoch")
             epoch_timer.start()
             rates = scheduler.get_last_lr()
@@ -449,31 +555,76 @@ def run_training(
                 "best_selection_score": best,
                 "manifest_sha256": chosen["manifest_sha256"],
             }
-            with phase_timer("checkpoint") as checkpoint_timer:
-                for name in ["last.pt", "best.pt"] if improved else ["last.pt"]:
-                    temporary = output / (name + ".tmp")
-                    torch.save(checkpoint, temporary)
-                    temporary.replace(output / name)
-            checkpoint_seconds = checkpoint_timer.last
-            elapsed = epoch_timer.stop()
-            epoch_seconds.append(elapsed)
             metrics = {
                 "epoch": epoch,
                 "learning_rates": rates,
                 "train": training,
                 "validation": validation,
                 "timing": {
-                    "epoch_seconds": elapsed,
-                    "checkpoint_seconds": checkpoint_seconds,
-                    "elapsed_training_seconds": time.perf_counter() - training_started,
-                    "elapsed_total_seconds": time.perf_counter() - fit_started,
+                    # Filled after commit in the journal; null if recovery must repair
+                    # an append interrupted immediately after checkpoint publication.
+                    "epoch_seconds": None,
+                    "checkpoint_seconds": None,
+                    "elapsed_training_seconds": training_offset
+                    + time.perf_counter()
+                    - training_started,
+                    "elapsed_total_seconds": total_offset
+                    + time.perf_counter()
+                    - fit_started,
                     **estimate_runtime(
-                        epoch_seconds,
+                        [*epoch_seconds, None],
                         settings.epochs,
-                        time.perf_counter() - fit_started,
+                        total_offset + time.perf_counter() - fit_started,
                     ),
                 },
             }
+            history.append(metrics)
+            if improved:
+                best_checkpoint = f".best-epoch-{epoch:06d}.pt"
+            progress = {
+                "best": best,
+                "best_epoch": best_epoch,
+                "best_validation_loss": best_validation_loss,
+                "best_validation_mae": best_validation_mae,
+                "best_validation_distribution": best_validation_distribution,
+                "best_checkpoint": best_checkpoint,
+                "resumes": resumes,
+                "setup_seconds": setup_seconds,
+            }
+            with phase_timer("checkpoint") as checkpoint_timer:
+                assert best_checkpoint is not None
+                if improved:
+                    atomic_checkpoint(output / best_checkpoint, checkpoint)
+                checkpoint["training_state"] = {
+                    "version": 1,
+                    "optimizer": optimizer.state_dict(),
+                    "scheduler": scheduler.state_dict(),
+                    "scaler": scaler.state_dict(),
+                    "rng": rng_state(generator),
+                    "progress": progress,
+                    "history": history,
+                }
+                atomic_checkpoint(output / "last.pt", checkpoint)
+                publish_best(output, best_checkpoint)
+            elapsed = epoch_timer.stop()
+            epoch_seconds.append(elapsed)
+            metrics["timing"].update(
+                {
+                    "epoch_seconds": elapsed,
+                    "checkpoint_seconds": checkpoint_timer.last,
+                    "elapsed_training_seconds": training_offset
+                    + time.perf_counter()
+                    - training_started,
+                    "elapsed_total_seconds": total_offset
+                    + time.perf_counter()
+                    - fit_started,
+                    **estimate_runtime(
+                        epoch_seconds,
+                        settings.epochs,
+                        total_offset + time.perf_counter() - fit_started,
+                    ),
+                }
+            )
             with (output / "metrics.jsonl").open("a") as stream:
                 stream.write(json.dumps(metrics, allow_nan=False) + "\n")
             if wb_run is not None:
@@ -494,12 +645,18 @@ def run_training(
             "best_validation_distribution": best_validation_distribution,
             "checkpoint": "best.pt",
             "setup_seconds": setup_seconds,
-            "training_seconds": time.perf_counter() - training_started,
-            "total_seconds": time.perf_counter() - fit_started,
+            "training_seconds": training_offset
+            + time.perf_counter()
+            - training_started,
+            "total_seconds": total_offset + time.perf_counter() - fit_started,
             "first_epoch_seconds": epoch_seconds[0],
-            "mean_steady_epoch_seconds": sum(epoch_seconds[1:]) / len(epoch_seconds[1:])
-            if len(epoch_seconds) > 1
+            "mean_steady_epoch_seconds": sum(
+                v for v in epoch_seconds[1:] if v is not None
+            )
+            / len([v for v in epoch_seconds[1:] if v is not None])
+            if any(v is not None for v in epoch_seconds[1:])
             else None,
+            "resumes": resumes,
         }
         save_json(output / "summary.json", summary)
         if wb_run is not None:

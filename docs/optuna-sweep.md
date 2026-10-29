@@ -75,8 +75,9 @@ a follow-up should repeat promising configurations on additional training
 seeds before a final held-out test evaluation.
 
 Each backbone gets one Babel Slurm job: one 48GB L40S, 4 CPUs, 16GB host RAM,
-account `agu`, partition `preempt`, QoS `preempt_qos`, two-hour wall limit, no
-automatic requeue. Trials are serial per study; studies can run concurrently.
+account `agu`, partition `preempt`, QoS `preempt_qos`, two-hour wall limit.
+Checkpoint-aware submissions permit automatic preemption requeue. Trials are
+serial per study; studies can run concurrently.
 Previous full fits took about 366, 520, 422 seconds. At those costs, 36 full fits
 cost 4.36 GPU-hours. A rough estimate with pruning is 2–4 GPU-hours /45–90 minutes
 elapsed with all GPUs available. Compilation, changed heads, checkpoint I/O,
@@ -90,8 +91,10 @@ replay with `deploy/sync_babble.py` uploads them after fetching. SQLite database
 CSV exports, source hashes, complete resolved configs, explicit overrides,
 intermediate values, decisions, selected epochs and checkpoints stay on disk.
 Hardware failures abort a study rather than silently adjusting settings.
-After preemption, records persist but execution does not automatically resume;
-inspect them and explicitly disclose any recovery launch.
+Checkpoint-aware jobs resume full training state and the same Optuna trial after
+preemption requeue. Older weights-only checkpoints cannot faithfully resume.
+See [checkpointing and recovery](checkpointing.md) for compatibility, journal
+repair, source-provenance migration, and reproducibility limits.
 
 ## Reproduction
 
@@ -106,7 +109,7 @@ bash deploy/sweep_babble.sh /home/cyrils/macs/data/training/manifest.json \
 ```
 
 The runner rejects source/config/data fingerprints or parameters that differ
-from the plan, and refuses to overwrite an existing study. Per-backbone
+from the plan, and requires `--resume` to reopen an existing study. Per-backbone
 `study-summary.json` reports the best completed trial and counts by Optuna
 state; `trials.csv` includes pruned trials and intermediate scores.
 
