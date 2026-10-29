@@ -239,3 +239,7 @@ See Thames et al., *Nutrition5k: Towards Automatic Nutritional Understanding of
 Generic Food*, CVPR 2021. The Codex adapter follows the
 [official SDK documentation](https://developers.openai.com/codex/sdk/).
 Downloaded data and generated run artifacts are gitignored.
+
+For matched frozen-head hyperparameter searches with early pruning, see the
+[Optuna pilot protocol](docs/optuna-sweep.md) and
+[sweep configuration](configs/sweep-gaussian.toml).

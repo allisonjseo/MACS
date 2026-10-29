@@ -67,6 +67,7 @@ class TrainConfig(BaseModel):
     eps: float = Field(default=1e-8, gt=0)
     scheduler: Literal["cosine"] = "cosine"
     loss: Literal["standardized_smooth_l1", "gaussian_nll"] = "standardized_smooth_l1"
+    selection_metric: Literal["loss", "calorie_nll"] = "loss"
     gaussian_min_std: float = Field(default=1e-3, gt=0)
     gaussian_initial_std: float = Field(default=1.0, gt=0)
     huber_beta: float = Field(default=1.0, gt=0)
@@ -80,6 +81,8 @@ class TrainConfig(BaseModel):
             raise ValueError(f"Expected targets in order {TARGETS}")
         if self.gaussian_initial_std <= self.gaussian_min_std:
             raise ValueError("gaussian_initial_std must exceed gaussian_min_std")
+        if self.selection_metric == "calorie_nll" and self.loss != "gaussian_nll":
+            raise ValueError("calorie_nll selection requires Gaussian heads")
         return self
 
 

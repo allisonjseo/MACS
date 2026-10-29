@@ -460,3 +460,63 @@ def test_deployment_shell_syntax_and_psc_arguments(tmp_path, monkeypatch):
     assert "--account=test-allocation" in commands[3]
     assert "--partition=GPU-shared" in commands[3]
     assert "--set epochs=7" in commands[3]
+
+
+def test_pruned_training_finalizes_logs_and_saves_calorie_selected_checkpoint(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr("timm.create_model", lambda *a, **kw: TinyBackbone())
+    monkeypatch.setattr(
+        train, "model_data_config", lambda c: resolve_model_data_config(TinyBackbone())
+    )
+    data = TrainingManifest(
+        seed=42,
+        validation_fraction=0.2,
+        train=[sample(tmp_path, "train0", 100), sample(tmp_path, "train1", 200)],
+        validation=[sample(tmp_path, "val", 300)],
+        missing_overhead_images=[],
+        missing_labels=[],
+        official_test_ids=["test"],
+    )
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(data.model_dump_json())
+    calls = iter(
+        [
+            {"loss": 1, "mae": {}},
+            {"loss": 1, "mae": {}, "nll": {"calories_kcal": 6}},
+            {"loss": 2, "mae": {}},
+            {"loss": 2, "mae": {}, "nll": {"calories_kcal": 5}},
+        ]
+    )
+
+    def fake_pass(*args):
+        if len(args) > 4:
+            args[4].step()
+        return next(calls)
+
+    monkeypatch.setattr(train, "epoch_pass", fake_pass)
+    output = tmp_path / "run"
+    summary = train.run_training(
+        Path("configs/resnet-gaussian.toml"),
+        manifest,
+        output,
+        [
+            "device=cpu",
+            "pretrained=false",
+            "compile_model=false",
+            "epochs=3",
+            "workers=0",
+            "wandb_mode=disabled",
+            "selection_metric=calorie_nll",
+        ],
+        epoch_callback=lambda row: row["epoch"] == 2,
+    )
+    assert summary["stopped_early"] and summary["epochs"] == 2
+    assert summary["max_epochs"] == 3 and summary["best_epoch"] == 2
+    assert summary["best_selection_score"] == 5
+    assert summary["best_validation_loss"] == 2
+    state = torch.load(output / "best.pt", weights_only=True)
+    assert state["epoch"] == 2 and state["best_selection_score"] == 5
+    assert len((output / "metrics.jsonl").read_text().splitlines()) == 2
+    with pytest.raises(ValueError, match="requires Gaussian"):
+        TrainConfig(backbone="resnet", selection_metric="calorie_nll")

@@ -8,6 +8,7 @@ import platform
 import random
 import time
 import tomllib
+from collections.abc import Callable
 from importlib.metadata import version
 from pathlib import Path
 from typing import Annotated, Any
@@ -84,6 +85,12 @@ def gaussian_totals_keys():
         "coverage_95_pct",
         "mean_interval_width_95",
     )
+
+
+def selection_score(validation, settings):
+    if settings.selection_metric == "calorie_nll":
+        return validation["nll"]["calories_kcal"]
+    return validation["loss"]
 
 
 @app.command()
@@ -225,6 +232,20 @@ def fit(
     dry_run: bool = False,
 ):
     """Print the exact resolved configuration, then train (or only print with --dry-run)."""
+    return run_training(config, manifest, output, overrides, dry_run)
+
+
+def run_training(
+    config: Path,
+    manifest: Path,
+    output: Path,
+    overrides: list[str] | None = None,
+    dry_run: bool = False,
+    *,
+    epoch_callback: Callable[[dict[str, Any]], bool] | None = None,
+    experiment_metadata: dict[str, Any] | None = None,
+):
+    """Train with an optional post-epoch stop callback; always finalize stopped runs."""
     fit_started = time.perf_counter()
     settings, changes = load_config(config, overrides or [])
     manifest = manifest.resolve()
@@ -246,7 +267,9 @@ def fit(
         "output": str(output.resolve()),
         "target_normalization": "training-only population mean/std; std floor 1e-6",
         "prediction_postprocessing": "inverse standardization, clamp minimum to zero",
-        "selection": "minimum validation standardized Gaussian NLL"
+        "selection": "minimum calorie-only validation NLL in kcal units"
+        if settings.selection_metric == "calorie_nll"
+        else "minimum validation standardized Gaussian NLL"
         if settings.loss == "gaussian_nll"
         else "minimum validation standardized Smooth L1 loss",
         "distribution": "independent untruncated Gaussian per target; unconstrained mean; std=softplus(raw_std)+floor; full NLL including constant; mean over samples and targets"
@@ -264,6 +287,8 @@ def fit(
             "hostname": platform.node(),
         },
     }
+    if experiment_metadata is not None:
+        chosen["experiment"] = experiment_metadata
     print(json.dumps(chosen, indent=2), flush=True)
     if dry_run:
         return
@@ -387,9 +412,11 @@ def fit(
         training_started = time.perf_counter()
         epoch_seconds = []
         best = float("inf")
+        best_validation_loss = None
         best_epoch = None
         best_validation_mae = None
         best_validation_distribution = {}
+        stopped_early = False
         for epoch in range(1, settings.epochs + 1):
             epoch_timer = phase_timer("epoch")
             epoch_timer.start()
@@ -399,9 +426,11 @@ def fit(
             )
             validation = epoch_pass(model, loaders[1], device, settings)
             scheduler.step()
-            improved = validation["loss"] < best
+            score = selection_score(validation, settings)
+            improved = score < best
             if improved:
-                best, best_epoch = validation["loss"], epoch
+                best, best_epoch = score, epoch
+                best_validation_loss = validation["loss"]
                 best_validation_mae = validation["mae"]
                 best_validation_distribution = {
                     key: validation[key]
@@ -415,7 +444,9 @@ def fit(
                 "data_config": preprocessing,
                 "epoch": epoch,
                 "validation": validation,
-                "best_validation_loss": best,
+                "best_validation_loss": best_validation_loss,
+                "selection_metric": settings.selection_metric,
+                "best_selection_score": best,
                 "manifest_sha256": chosen["manifest_sha256"],
             }
             with phase_timer("checkpoint") as checkpoint_timer:
@@ -448,9 +479,16 @@ def fit(
             if wb_run is not None:
                 wb_run.log(wandb_metrics(metrics), step=epoch)
             print(json.dumps(metrics), flush=True)
+            if epoch_callback is not None and epoch_callback(metrics):
+                stopped_early = True
+                break
         summary = {
-            "epochs": settings.epochs,
-            "best_validation_loss": best,
+            "epochs": len(epoch_seconds),
+            "max_epochs": settings.epochs,
+            "stopped_early": stopped_early,
+            "selection_metric": settings.selection_metric,
+            "best_selection_score": best,
+            "best_validation_loss": best_validation_loss,
             "best_epoch": best_epoch,
             "best_validation_mae": best_validation_mae,
             "best_validation_distribution": best_validation_distribution,
@@ -467,6 +505,7 @@ def fit(
         if wb_run is not None:
             wb_run.summary.update(wandb_summary(summary))
         print("Training summary: " + json.dumps(summary), flush=True)
+    return summary
 
 
 def main():

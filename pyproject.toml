@@ -28,6 +28,9 @@ analysis = [
     "plotnine>=0.15,<1",
     "scipy>=1.16,<2",
 ]
+sweep = [
+    "optuna>=4.6,<6",
+]
 
 [tool.uv]
 package = false

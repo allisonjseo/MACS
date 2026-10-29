@@ -78,6 +78,8 @@ def wandb_summary(summary: dict[str, Any]) -> dict[str, Any]:
             result[f"timing/{key}"] = value
         elif key == "best_validation_loss":
             result["val/best_loss"] = value
+        elif key == "best_selection_score":
+            result["val/best_selection_score"] = value
         elif key == "best_epoch":
             result["val/best_epoch"] = value
         elif key == "best_validation_mae":

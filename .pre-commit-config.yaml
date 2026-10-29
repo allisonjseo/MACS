@@ -10,23 +10,23 @@ repos:
         pass_filenames: false
       - id: ruff-check
         name: Ruff lint
-        entry: uv run --locked --extra vision --extra analysis ruff check --fix
+        entry: uv run --locked --extra vision --extra analysis --extra sweep ruff check --fix
         language: system
         types_or: [python, pyi]
       - id: ruff-format
         name: Ruff format
-        entry: uv run --locked --extra vision --extra analysis ruff format
+        entry: uv run --locked --extra vision --extra analysis --extra sweep ruff format
         language: system
         types_or: [python, pyi]
       - id: ty
         name: ty type check
-        entry: uv run --locked --extra vision --extra analysis ty check
+        entry: uv run --locked --extra vision --extra analysis --extra sweep ty check
         language: system
         pass_filenames: false
         always_run: true
       - id: pytest
         name: pytest
-        entry: uv run --locked --extra vision --extra analysis pytest
+        entry: uv run --locked --extra vision --extra analysis --extra sweep pytest
         language: system
         pass_filenames: false
         always_run: true

@@ -1,0 +1,32 @@
+# Matched, seeded random pilot; identical proposals for all three frozen encoders.
+seed = 20261029
+trials_per_backbone = 12
+backbones = ["resnet", "swin", "dino"]
+manifest_sha256 = "a940c2732a37b57ee4c0aed4dd5a4171c1834c410e2b491a3741d41bfcc4fbe1"
+objective = "best calorie-only validation Gaussian NLL, nats/example"
+pruning_epochs = [10, 20]
+reduction_factor = 2
+max_epochs = 30
+
+[overrides]
+selection_metric = "calorie_nll"
+wandb_mode = "offline"
+wandb_group = "optuna-gaussian-pilot-20261029"
+
+[search.head_lr]
+low = 0.0001
+high = 0.003
+log = true
+
+[search.weight_decay]
+low = 0.00001
+high = 0.1
+log = true
+
+[search.hidden_dim]
+choices = [128, 256, 512]
+
+[search.dropout]
+low = 0.0
+high = 0.4
+log = false
