@@ -35,14 +35,22 @@ def upload_run(output: Path):
         for key, value in best_row["validation"].items()
         if key not in ("mae", "loss") and isinstance(value, dict)
     }
+    sweep_trial = "trial" in config.get("experiment", {})
     with wandb.init(
         project=settings["wandb_project"],
         entity=settings.get("wandb_entity"),
         group=settings["wandb_group"],
         id=identity["id"],
         resume="allow",
-        name=output.name,
-        job_type="train",
+        name=f"{settings['backbone']}-{output.name}" if sweep_trial else output.name,
+        job_type="sweep-trial" if sweep_trial else "train",
+        tags=[
+            settings["backbone"],
+            "optuna",
+            "pruned" if summary.get("stopped_early") else "complete",
+        ]
+        if sweep_trial
+        else None,
         mode="online",
         config={
             **config,

@@ -33,29 +33,29 @@ optimizer and head settings.
 
 Every encoder stays pretrained and frozen, including BatchNorm and dropout.
 Defaults retained from `configs/{resnet,swin,dino}-gaussian.toml`: 30 epochs,
-batch32, workers4, seed42, float32, AdamW betas(0.9,0.999), eps1e-8, gradient
-clip1, cosine horizon30, Gaussian std floor0.001/initial std1 in standardized
+batch 32, workers 4, seed 42, float32, AdamW betas (0.9, 0.999), eps 1e-8, gradient
+clip 1, cosine horizon 30, Gaussian std floor 0.001 / initial std 1 in standardized
 units, all five targets, no augmentation, training-only normalization, and
-`torch.compile` Inductor/default/fullgraph/dynamic. Backbone LR1e-5 and Smooth
-L1 beta1 remain inactive.
+`torch.compile` Inductor/default/fullgraph/dynamic. Backbone LR 1e-5 and Smooth
+L1 beta 1 remain inactive.
 
 ## Pruning criteria and evidence
 
-Existing minimum calorie validation NLL occurred at epochs9 (ResNet),13 (Swin),
-and18 (DINO), with values5.6913,5.5006,5.4229. At epoch5 their best-so-far gaps
-from those minima were0.0159,0.1996,0.0980 nats; at epoch10 they were0,0.0720,
+Existing minimum calorie validation NLL occurred at epochs 9 (ResNet), 13 (Swin),
+and 18 (DINO), with values 5.6913, 5.5006, 5.4229. At epoch 5 their best-so-far gaps
+from those minima were 0.0159, 0.1996, 0.0980 nats; at epoch 10 they were 0, 0.0720,
 0.0269. These three observations motivate a 10-epoch initial budget rather than
-pruning at epoch1 or5. They do not establish that early ranking predicts final
+pruning at epoch 1 or 5. They do not establish that early ranking predicts final
 ranking across unseen configurations.
 
 Use `SuccessiveHalvingPruner(min_resource=10, reduction_factor=2,
 min_early_stopping_rate=0, bootstrap_count=0)` separately per backbone. Report
 **best-so-far** calorie validation NLL every epoch. Ask for pruning only after
-epochs10 and20. Approximately the best half of trials that have reached a rung
+epochs 10 and 20. Approximately the best half of trials that have reached a rung
 are promoted; first arrivals have fewer competitors. This is asynchronous
 successive halving, not exact cohort elimination. Trial zero is protected and
-supplies reference scores at both rungs. Survivors finish30 epochs. The cosine
-schedule retains its30-epoch horizon even for trials subsequently pruned.
+supplies reference scores at both rungs. Survivors finish 30 epochs. The cosine
+schedule retains its 30-epoch horizon even for trials subsequently pruned.
 There is no additional patience rule.
 
 Best-so-far scoring matches selecting a saved checkpoint and avoids discarding
@@ -68,25 +68,25 @@ See [Optuna's successive-halving documentation](https://optuna.readthedocs.io/en
 
 ## Data, compute, and records
 
-Use the same2204 training /551 validation images, seed42 split, manifest SHA256
+Use the same 2,204 training / 551 validation images, seed 42 split, manifest SHA256
 `a940c2732a37b57ee4c0aed4dd5a4171c1834c410e2b491a3741d41bfcc4fbe1`.
 No test data is loaded. Validation winners are subject to selection optimism;
 a follow-up should repeat promising configurations on additional training
 seeds before a final held-out test evaluation.
 
-Each backbone gets one Babel Slurm job: one48GB L40S,4CPUs,16GB host RAM,
-account`agu`, partition`preempt`, QoS`preempt_qos`, two-hour wall limit, no
+Each backbone gets one Babel Slurm job: one 48GB L40S, 4 CPUs, 16GB host RAM,
+account `agu`, partition `preempt`, QoS `preempt_qos`, two-hour wall limit, no
 automatic requeue. Trials are serial per study; studies can run concurrently.
-Previous full fits took about366,520,422 seconds. At those costs,36 full fits
-cost4.36 GPU-hours. A rough estimate with pruning is2–4 GPU-hours /45–90 minutes
+Previous full fits took about 366, 520, 422 seconds. At those costs, 36 full fits
+cost 4.36 GPU-hours. A rough estimate with pruning is 2–4 GPU-hours /45–90 minutes
 elapsed with all GPUs available. Compilation, changed heads, checkpoint I/O,
 queueing, and preemption can exceed that estimate; it is not a measured
 speedup or confidence interval.
 
-Each trial uses offline W&B, group`optuna-gaussian-pilot-20261029`, preserving
-`train/`,`val/`,`timing/` namespaces. Credentials are not copied to Babel.
+Each trial uses offline W&B, group `optuna-gaussian-pilot-20261029`, preserving
+`train/`, `val/`, `timing/` namespaces. Credentials are not copied to Babel.
 Completed and pruned runs finalize normal summaries and W&B records. Local
-replay with`deploy/sync_babble.py` uploads them after fetching. SQLite databases,
+replay with `deploy/sync_babble.py` uploads them after fetching. SQLite databases,
 CSV exports, source hashes, complete resolved configs, explicit overrides,
 intermediate values, decisions, selected epochs and checkpoints stay on disk.
 Hardware failures abort a study rather than silently adjusting settings.
@@ -108,4 +108,23 @@ bash deploy/sweep_babble.sh /home/cyrils/macs/data/training/manifest.json \
 The runner rejects source/config/data fingerprints or parameters that differ
 from the plan, and refuses to overwrite an existing study. Per-backbone
 `study-summary.json` reports the best completed trial and counts by Optuna
-state;`trials.csv` includes pruned trials and intermediate scores.
+state; `trials.csv` includes pruned trials and intermediate scores.
+
+The shared W&B group is `optuna-gaussian-pilot-20261029`. After fetching
+the remote output tree into `runs/babel/optuna-pilot/`, publish each backbone's
+completed/pruned histories and update the overview:
+
+```sh
+for backbone in resnet swin dino; do
+  .venv/bin/python deploy/sync_babble.py "runs/babel/optuna-pilot/$backbone"
+done
+.venv/bin/python deploy/publish_sweep.py runs/optuna-pilot-plan.json \
+  runs/babel/optuna-pilot
+```
+
+Run names include the backbone and trial number; tags identify backbone,
+Optuna, and complete/pruned status. The overview table includes proposed
+parameters, fetched status, selected NLL/epoch, elapsed time, and run links.
+It is a snapshot of fetched records, not a live Slurm dashboard. The plan is
+stored as a versioned W&B artifact; rerunning the publisher updates the same
+overview run.
