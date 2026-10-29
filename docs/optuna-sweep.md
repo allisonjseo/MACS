@@ -128,3 +128,17 @@ parameters, fetched status, selected NLL/epoch, elapsed time, and run links.
 It is a snapshot of fetched records, not a live Slurm dashboard. The plan is
 stored as a versioned W&B artifact; rerunning the publisher updates the same
 overview run.
+
+For automatic uploads while the submitted jobs run, use the bounded local relay:
+
+```sh
+.venv/bin/python deploy/watch_sweep.py runs/optuna-pilot-plan.json \
+  runs/babel/optuna-pilot JOB_ID_RESNET JOB_ID_SWIN JOB_ID_DINO
+```
+
+It fetches JSON/CSV/log records every minute, skips checkpoints and SQLite files,
+uploads newly completed/pruned trials, and refreshes the overview when fetched
+configs or summaries change. It stops after the jobs leave the queue (with a final
+fetch), or at a three-hour limit. It never launches or restarts training. Credentials
+stay on the local machine. The relay requires the local process and network to
+remain available; its snapshots are not continuous epoch-level online logging.
