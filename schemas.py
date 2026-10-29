@@ -47,6 +47,26 @@ class NutritionInterval(BaseModel):
 FIELDS = tuple(Nutrition.model_fields)
 
 
+class NutritionTarget(BaseModel):
+    """Observed totals for a pictured portion; absent labels are never zero-filled."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    calories_kcal: NonnegativeNumber | None = None
+    protein_g: NonnegativeNumber | None = None
+    carbs_g: NonnegativeNumber | None = None
+    fat_g: NonnegativeNumber | None = None
+
+    @model_validator(mode="after")
+    def has_label(self):
+        if all(getattr(self, key) is None for key in FIELDS):
+            raise ValueError("At least one nutrition target must be observed")
+        return self
+
+
+ImageMediaType = Literal["image/png", "image/jpeg", "image/webp", "image/gif"]
+
+
 class Prediction(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -74,7 +94,10 @@ class Sample(BaseModel):
     id: str
     image: str
     image_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    target: Nutrition
+    target: Nutrition | NutritionTarget
+    media_type: ImageMediaType | None = None
+    # Use participant/meal/object identity to keep related views in one split.
+    group_id: str | None = None
 
 
 class Manifest(BaseModel):
@@ -86,9 +109,11 @@ class Manifest(BaseModel):
     split: str
     seed: int
     n: int = Field(gt=0)
-    missing_overhead_images: list[str]
-    training_mean: Nutrition
-    training_label_count: int = Field(gt=0)
+    missing_overhead_images: list[str] = Field(default_factory=list)
+    training_mean: Nutrition | None = None
+    training_label_count: int = Field(default=0, ge=0)
+    training_split: str | None = None
+    preparation: dict[str, Any] = Field(default_factory=dict)
     samples: list[Sample]
     references: list[Sample] = Field(default_factory=list)
     missing_reference_images: list[str] = Field(default_factory=list)
@@ -105,6 +130,18 @@ class Manifest(BaseModel):
             raise ValueError("Manifest reference IDs must be unique")
         if sample_ids & reference_ids:
             raise ValueError("Test samples and training references must not overlap")
+        if (self.training_mean is None) != (self.training_label_count == 0):
+            raise ValueError(
+                "Training mean and positive training label count must be supplied together"
+            )
+        for reference in self.references:
+            Nutrition.model_validate(reference.target.model_dump())
+        if {s.group_id for s in self.samples if s.group_id} & {
+            s.group_id for s in self.references if s.group_id
+        }:
+            raise ValueError(
+                "Test samples and training references must not share groups"
+            )
         return self
 
 
@@ -114,7 +151,7 @@ class ImageInput(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     data: bytes
-    media_type: Literal["image/png", "image/jpeg", "image/webp", "image/gif"]
+    media_type: ImageMediaType
 
 
 class PredictorConfig(BaseModel):
@@ -131,7 +168,7 @@ class EvaluationRecord(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
     id: str
-    target: Nutrition
+    target: Nutrition | NutritionTarget
     status: Literal["ok", "error"] = "error"
     latency_seconds: NonnegativeNumber = 0.0
     prediction: Prediction | None = None
@@ -141,6 +178,7 @@ class EvaluationRecord(BaseModel):
 
 
 class Metric(BaseModel):
+    count: int = Field(default=0, ge=0)
     mae: NonnegativeNumber | None = None
     interval_count: int = Field(default=0, ge=0)
     interval_coverage_pct: NonnegativeNumber | None = Field(default=None, le=100)

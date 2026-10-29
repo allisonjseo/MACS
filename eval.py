@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Small, backend-independent Nutrition5k image-to-nutrition evaluation.
+"""Dataset- and backend-independent image-to-nutrition evaluation.
 
 Run with uv. See README.md for usage and backend contracts.
 """
@@ -17,13 +17,13 @@ from typing import Annotated
 from urllib.error import HTTPError
 from urllib.request import urlopen
 
-import polars as pl
 import typer
 from openai_codex.generated.v2_all import ReasoningEffort
 from tqdm import tqdm
 
 from classical import ClassicalPredictor
 from determinism import MAX_SEED, configure_determinism
+from eval_data import image_media_type, load_image, prepare_csv
 from predictors import (
     CodexPredictor,
     MeanPredictor,
@@ -36,7 +36,6 @@ from schemas import (
     CalorieAccuracy,
     EvaluationRecord,
     EvaluationSummary,
-    ImageInput,
     Manifest,
     Metric,
     Nutrition,
@@ -237,6 +236,7 @@ def prepare(
         missing_overhead_images=missing,
         training_mean=means,
         training_label_count=len(train),
+        training_split="rgb_train",
         samples=samples,
         references=references,
         missing_reference_images=missing_references,
@@ -245,76 +245,95 @@ def prepare(
     print("Prepared " + str(manifest_path))
 
 
+@app.command("import-csv")
+def import_csv(
+    labels: Annotated[Path, typer.Option(help="Normalized CSV; see docs/datasets.md")],
+    data_dir: Annotated[Path, typer.Option(help="New manifest directory")],
+    dataset: Annotated[str, typer.Option(help="Dataset name and version")],
+    source: Annotated[str, typer.Option(help="Dataset source URL or DOI")],
+    license: Annotated[str, typer.Option(help="License for the source data")],
+    split: Annotated[str, typer.Option(help="Evaluation split or protocol name")],
+    image_root: Annotated[
+        Path | None,
+        typer.Option(help="Relative image paths resolve here (default: CSV parent)"),
+    ] = None,
+    training_labels: Annotated[
+        Path | None, typer.Option(help="Separate training CSV for baselines/retrieval")
+    ] = None,
+    training_image_root: Annotated[
+        Path | None,
+        typer.Option(help="Training image root (default: training CSV parent)"),
+    ] = None,
+    training_split: Annotated[
+        str | None,
+        typer.Option(help="Required with training-labels; recorded as provenance"),
+    ] = None,
+    reference_n: Annotated[int, typer.Option(min=0)] = 0,
+    n: Annotated[
+        int | None, typer.Option(min=1, help="Seeded subset; default: all rows")
+    ] = None,
+    seed: Annotated[int, typer.Option(min=0, max=MAX_SEED)] = 42,
+):
+    """Import any local dataset into the shared evaluation manifest."""
+    manifest = prepare_csv(
+        labels=labels,
+        data_dir=data_dir,
+        dataset=dataset,
+        source=source,
+        license=license,
+        split=split,
+        image_root=image_root,
+        training_labels=training_labels,
+        training_image_root=training_image_root,
+        training_split=training_split,
+        reference_n=reference_n,
+        n=n,
+        seed=seed,
+    )
+    print(f"Prepared {data_dir.resolve() / 'manifest.json'} ({manifest.n} samples)")
+
+
 def score(rows: list[EvaluationRecord]) -> EvaluationSummary:
-    good = [
-        (row.prediction, row.target)
-        for row in rows
-        if row.status == "ok" and row.prediction is not None
+    """Score only observed labels; prediction and uncertainty contracts stay complete."""
+    good = [row for row in rows if row.status == "ok" and row.prediction is not None]
+    metrics = {}
+    for key in FIELDS:
+        labeled = [row for row in good if getattr(row.target, key) is not None]
+        errors, widths, covered = [], [], 0
+        for row in labeled:
+            assert row.prediction is not None
+            target = getattr(row.target, key)
+            mean = getattr(row.prediction.mean, key)
+            errors.append(abs(mean - target))
+            if row.prediction_interval is not None:
+                lower = getattr(row.prediction_interval.lower, key)
+                upper = getattr(row.prediction_interval.upper, key)
+                widths.append(upper - lower)
+                covered += lower <= target <= upper
+            elif row.prediction.sigma is not None:
+                half_width = getattr(row.prediction.sigma, key)
+                widths.append(2 * half_width)
+                covered += abs(mean - target) <= half_width
+            else:
+                continue
+        metrics[key] = Metric(
+            count=len(labeled),
+            mae=fmean(errors) if errors else None,
+            interval_count=len(widths),
+            interval_coverage_pct=100 * covered / len(widths) if widths else None,
+            mean_interval_width=fmean(widths) if widths else None,
+        )
+    calories = [
+        row
+        for row in good
+        if row.target.calories_kcal is not None and row.target.calories_kcal > 0
     ]
-    metrics = {key: Metric() for key in FIELDS}
-    within, eligible = 0, 0
-    if good:
-        frame = pl.DataFrame(
-            {
-                **{
-                    key: [getattr(prediction.mean, key) for prediction, _ in good]
-                    for key in FIELDS
-                },
-                **{
-                    key + "_target": [getattr(target, key) for _, target in good]
-                    for key in FIELDS
-                },
-            }
+    within = 0
+    for row in calories:
+        assert row.prediction is not None and row.target.calories_kcal is not None
+        within += abs(row.prediction.mean.calories_kcal - row.target.calories_kcal) <= (
+            0.2 * row.target.calories_kcal
         )
-        # Vector arithmetic preserves row order; fmean avoids parallel reductions
-        # whose floating-point addition order can vary with worker scheduling.
-        errors = frame.select(
-            [(pl.col(key) - pl.col(key + "_target")).abs().alias(key) for key in FIELDS]
-        )
-        metrics = {key: Metric(mae=fmean(errors[key].to_list())) for key in FIELDS}
-        interval_rows = [
-            (row.prediction_interval, row.target)
-            for row in rows
-            if row.status == "ok"
-            and row.prediction is not None
-            and row.prediction_interval is not None
-        ]
-        uncertain = [
-            (row.prediction.mean, row.prediction.sigma, row.target)
-            for row in rows
-            if row.status == "ok"
-            and row.prediction is not None
-            and row.prediction.sigma is not None
-            and row.prediction_interval is None
-        ]
-        for key in FIELDS:
-            interval_count = len(uncertain) + len(interval_rows)
-            if interval_count:
-                covered = sum(
-                    abs(getattr(mean, key) - getattr(target, key))
-                    <= getattr(sigma, key)
-                    for mean, sigma, target in uncertain
-                ) + sum(
-                    getattr(interval.lower, key)
-                    <= getattr(target, key)
-                    <= getattr(interval.upper, key)
-                    for interval, target in interval_rows
-                )
-                metrics[key].interval_count = interval_count
-                metrics[key].interval_coverage_pct = 100 * covered / interval_count
-                metrics[key].mean_interval_width = fmean(
-                    [2 * getattr(sigma, key) for _, sigma, _ in uncertain]
-                    + [
-                        getattr(interval.upper, key) - getattr(interval.lower, key)
-                        for interval, _ in interval_rows
-                    ]
-                )
-        calories = frame.filter(pl.col("calories_kcal_target") > 0)
-        eligible = calories.height
-        within = calories.filter(
-            (pl.col("calories_kcal") - pl.col("calories_kcal_target")).abs()
-            <= 0.2 * pl.col("calories_kcal_target")
-        ).height
     return EvaluationSummary(
         attempted=len(rows),
         succeeded=len(good),
@@ -322,8 +341,8 @@ def score(rows: list[EvaluationRecord]) -> EvaluationSummary:
         metrics=metrics,
         calories_within_20pct=CalorieAccuracy(
             count=within,
-            eligible_successes=eligible,
-            percent=100 * within / eligible if eligible else None,
+            eligible_successes=len(calories),
+            percent=100 * within / len(calories) if calories else None,
         ),
         mean_latency_seconds=fmean(row.latency_seconds for row in rows)
         if rows
@@ -381,6 +400,15 @@ def run(
         image = manifest_path.parent / sample.image
         if hashlib.sha256(image.read_bytes()).hexdigest() != sample.image_sha256:
             raise ValueError("Image checksum mismatch: " + sample.id)
+        image_media_type(sample)
+    if (
+        predictor in (Backend.mean, Backend.classical, Backend.sift)
+        and manifest.training_mean is None
+    ):
+        raise ValueError(
+            f"{predictor} requires complete training-only statistics; "
+            "supply --training-labels to import-csv. Evaluation labels are never used as a fallback."
+        )
     backend: Predictor
     if predictor == "codex":
         backend = (
@@ -394,8 +422,10 @@ def run(
             else CodexPredictor(model, timeout, reasoning_effort=reasoning_effort)
         )
     elif predictor == "classical":
+        assert manifest.training_mean is not None
         backend = ClassicalPredictor(manifest.training_mean)
     elif predictor == "mean":
+        assert manifest.training_mean is not None
         backend = MeanPredictor(manifest.training_mean)
     elif predictor == "vision":
         from vision import VisionPredictor
@@ -404,9 +434,10 @@ def run(
             raise ValueError("Vision predictor requires --checkpoint")
         backend = VisionPredictor(checkpoint, device=device)
     else:
+        assert manifest.training_mean is not None
         if not manifest.references:
             raise ValueError(
-                "SIFT predictor needs training references; run prepare with --reference-n"
+                "SIFT predictor needs training references; use prepare or import-csv with --reference-n"
             )
 
         def load_references():
@@ -415,11 +446,8 @@ def run(
             ):
                 yield (
                     reference.id,
-                    ImageInput(
-                        data=(manifest_path.parent / reference.image).read_bytes(),
-                        media_type="image/png",
-                    ),
-                    reference.target,
+                    load_image(reference, manifest_path.parent),
+                    Nutrition.model_validate(reference.target.model_dump()),
                 )
 
         backend = SiftPredictor(
@@ -432,12 +460,7 @@ def run(
         )
     if isinstance(backend, SiftPredictor):
         for sample in tqdm(samples, desc="Caching test SIFT features", unit="image"):
-            backend.cache_features(
-                ImageInput(
-                    data=(manifest_path.parent / sample.image).read_bytes(),
-                    media_type="image/png",
-                )
-            )
+            backend.cache_features(load_image(sample, manifest_path.parent))
     recording = EvaluationRun(
         RunConfig.capture(
             predictor=backend.config,
@@ -445,9 +468,16 @@ def run(
             manifest=raw_manifest,
             sample_ids=[sample.id for sample in samples],
             timeout_seconds=timeout,
+            dataset=manifest.dataset,
+            split=manifest.split,
         ),
         summarize=score,
         output=output,
+    )
+    # Preserve the exact input, including labels and preparation provenance.
+    (recording.output / "manifest.json").write_bytes(raw_manifest)
+    print(
+        "Run configuration: " + recording.config.model_dump_json(indent=2), flush=True
     )
     for index, sample in enumerate(
         tqdm(samples, desc=f"Evaluating {backend.config.backend}", unit="image"), 1
@@ -459,10 +489,7 @@ def run(
         try:
             # Backends receive only the photo, never the target.
             row.prediction = backend.predict(
-                ImageInput(
-                    data=(manifest_path.parent / sample.image).read_bytes(),
-                    media_type="image/png",
-                ),
+                load_image(sample, manifest_path.parent),
             )
             row.prediction_interval = backend.last_interval
             row.status = "ok"

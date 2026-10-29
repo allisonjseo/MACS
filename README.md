@@ -1,11 +1,15 @@
-# Nutrition5k image evaluation
+# Image-to-nutrition evaluation
 
 A small evaluation of total calories (kcal), protein (g), carbohydrates (g), and
-fat (g) from one overhead RGB food photograph. Dependencies are managed by
+fat (g) from one RGB food photograph. Nutrition5k remains the default benchmark;
+other datasets plug into the same runner through a common manifest or the
+`import-csv` command. See [dataset recommendations and the import interface](docs/datasets.md)
+for SNAPMe, SimpleFood45, MetaFood3D, label requirements, and example commands.
+Dependencies are managed by
 [`uv`](https://docs.astral.sh/uv/), with exact versions in `uv.lock` and Python
 3.13 selected by `.python-version` (Python 3.12+ supported). Pydantic validates
-labels, manifests, and predictions and generates the JSON schema. Polars computes
-per-image errors; stable sums compute training means and aggregate metrics.
+labels, manifests, and predictions and generates the JSON schema. Stable sums
+compute training means and aggregate metrics.
 Data stays in typed Python objects;
 JSON is used at the persistence and model-response boundaries.
 
@@ -164,8 +168,10 @@ run sequentially, plus downloads; actual runtime and image availability vary.
 
 Each run creates a new `runs/<timestamp>-<backend>/` directory containing:
 
+- `manifest.json`: exact input manifest, including dataset/split identity, labels,
+  image checksums, and preparation provenance.
 - `config.json`: backend configuration (including `predictor.prompt` for Codex), sample IDs, timeout, and
-  manifest fingerprint, seed and OpenCV settings (`determinism`), Python and
+  dataset/split identity, manifest fingerprint, seed and OpenCV settings (`determinism`), Python and
   dependency versions, and Git provenance (`git.commit` and
   `git.dirty`, including untracked files). Git is read from the evaluator checkout,
   even when launched elsewhere; unavailable provenance is recorded as null.
@@ -173,13 +179,19 @@ Each run creates a new `runs/<timestamp>-<backend>/` directory containing:
   with prediction or error,
   reference labels, and latency. Codex records also include typed SDK items and
   token usage.
-- `summary.json`: mean absolute error for each target, calorie estimates within
+- `summary.json`: mean absolute error and observed-label `count` for each target, calorie estimates within
   ±20%, success/failure counts, and average latency. Updated after every image.
   Each nutrient also records `interval_count`, `interval_coverage_pct` (the
   percentage of labels inside the reported interval), and `mean_interval_width`.
   Codex uses `mean ± sigma` with width `2 * sigma`; SIFT uses its explicit bounds
   with width `upper - lower` after clipping. Only successful predictions with uncertainty enter
   interval metrics; unavailable metrics are null.
+
+Datasets may provide only some nutrition labels. Each nutrient is scored only
+where its target is observed; missing labels are never treated as zero. The
+prediction contract still requires all four nutrients. Checkpoint and Codex runs
+need no training statistics; training-dependent baselines require separate
+training labels, as described in [the dataset guide](docs/datasets.md).
 
 MAE and the ±20% rate use successful predictions only; inspect failure counts
 when comparing backends. Zero-calorie references are excluded from the percentage

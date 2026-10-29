@@ -70,6 +70,8 @@ class RunConfig(BaseModel):
     dependencies: dict[str, str]
     python_version: str
     git: GitRevision
+    dataset: str | None = None
+    split: str | None = None
 
     @classmethod
     def capture(
@@ -81,6 +83,8 @@ class RunConfig(BaseModel):
         sample_ids: list[str],
         timeout_seconds: int,
         project_dir: Path = PROJECT_DIR,
+        dataset: str | None = None,
+        split: str | None = None,
     ) -> "RunConfig":
         return cls(
             predictor=predictor,
@@ -104,6 +108,8 @@ class RunConfig(BaseModel):
             },
             python_version=platform.python_version(),
             git=GitRevision.capture(project_dir),
+            dataset=dataset,
+            split=split,
         )
 
 
