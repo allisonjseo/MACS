@@ -77,6 +77,13 @@ def wandb_summary(summary: dict[str, Any]) -> dict[str, Any]:
             result["val/best_loss"] = value
         elif key == "best_epoch":
             result["val/best_epoch"] = value
+        elif key == "best_validation_mae":
+            result.update(
+                {
+                    f"val/best_checkpoint_mae/{target}": error
+                    for target, error in value.items()
+                }
+            )
         else:
             result[key] = value
     return result

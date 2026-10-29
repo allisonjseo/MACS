@@ -342,6 +342,7 @@ def test_wandb_sections_and_warmup_aware_estimates():
             "training_seconds": 280,
             "best_validation_loss": 0.1,
             "best_epoch": 9,
+            "best_validation_mae": {"calories_kcal": 60.0},
         }
     )
     assert summary == {
@@ -349,6 +350,7 @@ def test_wandb_sections_and_warmup_aware_estimates():
         "timing/training_seconds": 280,
         "val/best_loss": 0.1,
         "val/best_epoch": 9,
+        "val/best_checkpoint_mae/calories_kcal": 60.0,
     }
     estimate = estimate_runtime([90, 9, 11, 10], 30, 130)
     assert estimate["steady_epoch_seconds"] == 10

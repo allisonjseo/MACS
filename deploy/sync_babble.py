@@ -28,6 +28,8 @@ def upload_run(output: Path):
     history = [
         json.loads(line) for line in (output / "metrics.jsonl").read_text().splitlines()
     ]
+    best_row = next(row for row in history if row["epoch"] == summary["best_epoch"])
+    summary["best_validation_mae"] = best_row["validation"]["mae"]
     with wandb.init(
         project=settings["wandb_project"],
         entity=settings.get("wandb_entity"),

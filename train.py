@@ -324,6 +324,7 @@ def fit(
         epoch_seconds = []
         best = float("inf")
         best_epoch = None
+        best_validation_mae = None
         for epoch in range(1, settings.epochs + 1):
             epoch_timer = phase_timer("epoch")
             epoch_timer.start()
@@ -336,6 +337,7 @@ def fit(
             improved = validation["loss"] < best
             if improved:
                 best, best_epoch = validation["loss"], epoch
+                best_validation_mae = validation["mae"]
             checkpoint = {
                 "format_version": 1,
                 "model": model.state_dict(),
@@ -380,6 +382,7 @@ def fit(
             "epochs": settings.epochs,
             "best_validation_loss": best,
             "best_epoch": best_epoch,
+            "best_validation_mae": best_validation_mae,
             "checkpoint": "best.pt",
             "setup_seconds": setup_seconds,
             "training_seconds": time.perf_counter() - training_started,
