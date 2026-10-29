@@ -168,7 +168,8 @@ def test_finetuning_enables_encoder_gradients(monkeypatch):
     assert all(p.grad is not None for p in model.backbone.parameters())
 
 
-def test_tiny_training_checkpoint_and_evaluator_roundtrip(tmp_path, monkeypatch):
+@pytest.mark.parametrize("loss", ["standardized_smooth_l1", "gaussian_nll"])
+def test_tiny_training_checkpoint_and_evaluator_roundtrip(tmp_path, monkeypatch, loss):
     def tiny_model(name, pretrained, num_classes):
         assert name == BACKBONES["resnet"]
         assert pretrained is False and num_classes == 0
@@ -212,6 +213,7 @@ def test_tiny_training_checkpoint_and_evaluator_roundtrip(tmp_path, monkeypatch)
         "dropout=0",
         "compile_backend=eager",
         "wandb_mode=offline",
+        f"loss={loss}",
     ):
         args.extend(["--set", override])
     runner = CliRunner()
@@ -281,6 +283,16 @@ def test_tiny_training_checkpoint_and_evaluator_roundtrip(tmp_path, monkeypatch)
     records = json.loads((evaluation_output / "predictions.json").read_text())
     assert records[0]["status"] == "ok"
     assert records[0]["backend_metadata"]["mass_g"] >= 0
+    if loss == "gaussian_nll":
+        assert records[0]["prediction_interval"] is not None
+        for key in FIELDS:
+            std = records[0]["backend_metadata"]["gaussian_std"][key]
+            assert std > 0
+            assert records[0]["prediction"]["sigma"][key] == pytest.approx(
+                1.959963984540054 * std
+            )
+        assert "nll" in metrics["validation"]
+        assert "mean_std" in metrics["validation"]
     assert all(value >= 0 for value in records[0]["prediction"]["mean"].values())
     recorded = json.loads((evaluation_output / "config.json").read_text())
     assert (
@@ -292,6 +304,49 @@ def test_tiny_training_checkpoint_and_evaluator_roundtrip(tmp_path, monkeypatch)
     assert repeated.exit_code != 0
 
 
+def test_gaussian_head_likelihood_positive_scales_and_frozen_encoder(monkeypatch):
+    monkeypatch.setattr("timm.create_model", lambda *a, **kw: TinyBackbone())
+    config = TrainConfig(
+        backbone="resnet", pretrained=False, loss="gaussian_nll", dropout=0
+    )
+    model = NutritionRegressor(config).train()
+    output = model(torch.randn(2, 3, 16, 16))
+    assert output.shape == (2, len(TARGETS), 2)
+    mean, std = model.gaussian_parameters(output)
+    assert torch.allclose(std, torch.ones_like(std))
+    expected = torch.full_like(mean, 3)
+    nll = nn.functional.gaussian_nll_loss(
+        mean, expected, std.square(), full=True, reduction="none"
+    )
+    assert torch.allclose(
+        nll, -torch.distributions.Normal(mean, std).log_prob(expected)
+    )
+    nll.mean().backward()
+    assert all(p.grad is None for p in model.backbone.parameters())
+    assert all(
+        p.grad is not None and torch.isfinite(p.grad).all()
+        for p in model.heads.parameters()
+    )
+    extreme = torch.zeros(2, len(TARGETS), 2)
+    extreme[..., 1] = -1e4
+    _, floor = model.gaussian_parameters(extreme)
+    assert torch.all(floor >= config.gaussian_min_std)
+
+
+def test_gaussian_intervals_preserve_signed_raw_bounds():
+    from schemas import NutritionInterval, SignedNutrition
+
+    bounds = NutritionInterval(
+        lower=SignedNutrition(**{key: -1.0 for key in FIELDS}),
+        upper=SignedNutrition(**{key: 2.0 for key in FIELDS}),
+    )
+    assert bounds.lower.calories_kcal == -1
+    assert (
+        NutritionInterval.model_validate_json(bounds.model_dump_json()).model_dump()
+        == bounds.model_dump()
+    )
+
+
 def test_configs_only_differ_in_backbone_and_reject_unknown_overrides():
     root = Path(__file__).resolve().parents[1]
     values = []
@@ -299,6 +354,14 @@ def test_configs_only_differ_in_backbone_and_reject_unknown_overrides():
         config, changes = train.load_config(root / f"configs/{name}.toml", [])
         assert not changes
         values.append(config.model_dump(exclude={"backbone"}))
+        gaussian, _ = train.load_config(root / f"configs/{name}-gaussian.toml", [])
+        differences = {
+            key
+            for key in type(config).model_fields
+            if getattr(config, key) != getattr(gaussian, key)
+        }
+        assert differences == {"loss", "wandb_group"}
+        assert gaussian.freeze_backbone is True
     assert values[0] == values[1] == values[2]
     with pytest.raises(ValueError, match="known_config_key"):
         train.load_config(root / "configs/resnet.toml", ["batch_szie=4"])

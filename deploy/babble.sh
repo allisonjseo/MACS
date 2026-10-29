@@ -11,6 +11,8 @@ output_root=$2
 shift 2
 mkdir -p "$output_root/logs"
 python=${PYTHON:-.venv/bin/python}
+config_suffix=${MACS_CONFIG_SUFFIX:-}
+case "$config_suffix" in ''|-gaussian) ;; *) echo 'Invalid MACS_CONFIG_SUFFIX' >&2; exit 2 ;; esac
 options=(
     --parsable --account="${BABEL_ACCOUNT:-agu}"
     --partition="${PARTITION:-preempt}" --qos="${QOS:-preempt_qos}"
@@ -25,7 +27,7 @@ printf '\n'
 read -r -a models <<< "${MACS_MODELS:-resnet swin dino}"
 for model in "${models[@]}"; do
     case "$model" in resnet|swin|dino) ;; *) echo "Unknown model: $model" >&2; exit 2 ;; esac
-    "$python" train.py fit --config "configs/$model.toml" --manifest "$manifest" \
+    "$python" train.py fit --config "configs/$model$config_suffix.toml" --manifest "$manifest" \
         --output "$output_root/SLURM_JOB_ID-$model" "$@" --dry-run
 done
 sbatch "${options[@]}" deploy/babble.sbatch "$manifest" "$output_root" "$@"

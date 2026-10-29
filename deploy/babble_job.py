@@ -23,6 +23,9 @@ def main():
     job_id = os.environ["SLURM_JOB_ID"]
     results = []
     models = environment.get("MACS_MODELS", "resnet swin dino").split()
+    config_suffix = environment.get("MACS_CONFIG_SUFFIX", "")
+    if config_suffix not in ("", "-gaussian"):
+        raise ValueError("Invalid MACS_CONFIG_SUFFIX")
     if not models or any(model not in {"resnet", "swin", "dino"} for model in models):
         raise ValueError("MACS_MODELS must select resnet, swin, and/or dino")
     for model in models:
@@ -37,7 +40,7 @@ def main():
             "train.py",
             "fit",
             "--config",
-            f"configs/{model}.toml",
+            f"configs/{model}{config_suffix}.toml",
             "--manifest",
             manifest,
             "--output",

@@ -1,5 +1,10 @@
 # Image regression training
 
+For Gaussian mean-and-scale heads trained by negative log-likelihood with the
+same **frozen** backbones, see [Gaussian heads](../docs/gaussian-heads.md) and
+`configs/{resnet,swin,dino}-gaussian.toml`. Set `MACS_CONFIG_SUFFIX=-gaussian`
+when using the Babel launcher; the default selects the original point configs.
+
 Three pretrained encoders share the same training pipeline and five **independent**
 regression heads: `calories_kcal`, `protein_g`, `carbs_g`, `fat_g`, and `mass_g`.
 Each head is Linear(features, 256), ReLU, Dropout(0.1), Linear(256, 1).

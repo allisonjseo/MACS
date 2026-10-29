@@ -16,13 +16,23 @@ class Nutrition(BaseModel):
     fat_g: NonnegativeNumber
 
 
+class SignedNutrition(BaseModel):
+    """Finite signed values for untruncated Gaussian interval bounds."""
+
+    model_config = ConfigDict(extra="forbid")
+    calories_kcal: Annotated[float, Field(strict=True, allow_inf_nan=False)]
+    protein_g: Annotated[float, Field(strict=True, allow_inf_nan=False)]
+    carbs_g: Annotated[float, Field(strict=True, allow_inf_nan=False)]
+    fat_g: Annotated[float, Field(strict=True, allow_inf_nan=False)]
+
+
 class NutritionInterval(BaseModel):
     """A range for each nutrient, in the same units as Nutrition."""
 
     model_config = ConfigDict(extra="forbid")
 
-    lower: Nutrition
-    upper: Nutrition
+    lower: Nutrition | SignedNutrition
+    upper: Nutrition | SignedNutrition
 
     @model_validator(mode="after")
     def ordered_bounds(self):

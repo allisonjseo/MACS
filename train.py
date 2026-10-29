@@ -25,6 +25,7 @@ from timing import estimate_runtime, phase_timer
 from tracking import wandb_metrics, wandb_session, wandb_summary
 from vision import (
     BACKBONES,
+    NORMAL_95_Z,
     TARGETS,
     NutritionRegressor,
     TrainConfig,
@@ -75,6 +76,16 @@ def seed_worker(worker_id: int):
     np.random.seed(seed)
 
 
+def gaussian_totals_keys():
+    return (
+        "nll_standardized",
+        "nll",
+        "mean_std",
+        "coverage_95_pct",
+        "mean_interval_width_95",
+    )
+
+
 @app.command()
 def prepare(
     source_dir: Path = Path("data/nutrition5k"),
@@ -97,6 +108,10 @@ def epoch_pass(model, loader, device, config, optimizer=None, scaler=None):
     model.train(training)
     total_loss, count = 0.0, 0
     errors = torch.zeros(len(TARGETS), dtype=torch.float64)
+    gaussian_totals = {
+        key: torch.zeros(len(TARGETS), dtype=torch.float64)
+        for key in gaussian_totals_keys()
+    }
     dtype = torch.float16 if config.precision == "float16" else torch.bfloat16
     if device.type == "cuda":
         torch.cuda.synchronize(device)
@@ -119,11 +134,24 @@ def epoch_pass(model, loader, device, config, optimizer=None, scaler=None):
                 enabled=config.precision != "float32",
             ),
         ):
-            normalized = model(images)
+            output = model(images)
             expected = (targets - model.target_mean) / model.target_std
-            loss = nn.functional.smooth_l1_loss(
-                normalized.float(), expected, beta=config.huber_beta
-            )
+            if config.loss == "gaussian_nll":
+                normalized, std = model.gaussian_parameters(output)
+                nll = nn.functional.gaussian_nll_loss(
+                    normalized,
+                    expected,
+                    std.square(),
+                    full=True,
+                    eps=config.gaussian_min_std**2,
+                    reduction="none",
+                )
+                loss = nll.mean()
+            else:
+                normalized = output
+                loss = nn.functional.smooth_l1_loss(
+                    normalized.float(), expected, beta=config.huber_beta
+                )
         if not torch.isfinite(loss):
             raise RuntimeError(
                 "Nonfinite loss; run stopped without changing configuration"
@@ -146,6 +174,21 @@ def epoch_pass(model, loader, device, config, optimizer=None, scaler=None):
             .sum(0)
             .cpu()
         )
+        if config.loss == "gaussian_nll":
+            with torch.no_grad():
+                physical_std = std.detach() * model.target_std
+                covered = (
+                    expected - normalized.detach()
+                ).abs() <= NORMAL_95_Z * std.detach()
+                values = {
+                    "nll_standardized": nll.detach(),
+                    "nll": nll.detach() + model.target_std.log(),
+                    "mean_std": physical_std,
+                    "coverage_95_pct": covered.float() * 100,
+                    "mean_interval_width_95": 2 * NORMAL_95_Z * physical_std,
+                }
+                for key, value in values.items():
+                    gaussian_totals[key] += value.double().sum(0).cpu()
         if first_batch_seconds is None:
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
@@ -153,13 +196,21 @@ def epoch_pass(model, loader, device, config, optimizer=None, scaler=None):
     if device.type == "cuda":
         torch.cuda.synchronize(device)
     elapsed = timer.stop()
-    return {
+    metrics = {
         "loss": total_loss / count,
         "mae": dict(zip(TARGETS, (errors / count).tolist(), strict=True)),
         "seconds": elapsed,
         "first_batch_seconds": first_batch_seconds,
         "images_per_second": count / elapsed,
     }
+    if config.loss == "gaussian_nll":
+        metrics.update(
+            {
+                key: dict(zip(TARGETS, (value / count).tolist(), strict=True))
+                for key, value in gaussian_totals.items()
+            }
+        )
+    return metrics
 
 
 @app.command()
@@ -195,7 +246,12 @@ def fit(
         "output": str(output.resolve()),
         "target_normalization": "training-only population mean/std; std floor 1e-6",
         "prediction_postprocessing": "inverse standardization, clamp minimum to zero",
-        "selection": "minimum validation standardized Smooth L1 loss",
+        "selection": "minimum validation standardized Gaussian NLL"
+        if settings.loss == "gaussian_nll"
+        else "minimum validation standardized Smooth L1 loss",
+        "distribution": "independent untruncated Gaussian per target; unconstrained mean; std=softplus(raw_std)+floor; full NLL including constant; mean over samples and targets"
+        if settings.loss == "gaussian_nll"
+        else "point estimates only",
         "batch_policy": "shuffle train; keep incomplete batches; no gradient accumulation",
         "monitoring": "stdout, metrics.jsonl, config.json, best.pt, last.pt, W&B (explicit mode)",
         "timing_policy": "CUDA-synchronized train/validation passes; first batches include lazy compilation; epoch wall time includes checkpoint I/O",
@@ -287,6 +343,14 @@ def fit(
             "validation_ids": [s.id for s in data.validation],
             "target_mean": model.target_mean.cpu().tolist(),
             "target_std": model.target_std.cpu().tolist(),
+            "parameters": {
+                "backbone_trainable": sum(
+                    p.numel() for p in model.backbone.parameters() if p.requires_grad
+                ),
+                "heads_trainable": sum(
+                    p.numel() for p in model.heads.parameters() if p.requires_grad
+                ),
+            },
             "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
             "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
         }
@@ -325,6 +389,7 @@ def fit(
         best = float("inf")
         best_epoch = None
         best_validation_mae = None
+        best_validation_distribution = {}
         for epoch in range(1, settings.epochs + 1):
             epoch_timer = phase_timer("epoch")
             epoch_timer.start()
@@ -338,6 +403,11 @@ def fit(
             if improved:
                 best, best_epoch = validation["loss"], epoch
                 best_validation_mae = validation["mae"]
+                best_validation_distribution = {
+                    key: validation[key]
+                    for key in gaussian_totals_keys()
+                    if key in validation
+                }
             checkpoint = {
                 "format_version": 1,
                 "model": model.state_dict(),
@@ -383,6 +453,7 @@ def fit(
             "best_validation_loss": best,
             "best_epoch": best_epoch,
             "best_validation_mae": best_validation_mae,
+            "best_validation_distribution": best_validation_distribution,
             "checkpoint": "best.pt",
             "setup_seconds": setup_seconds,
             "training_seconds": time.perf_counter() - training_started,

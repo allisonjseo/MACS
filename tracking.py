@@ -48,9 +48,12 @@ def wandb_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
     for split in ("train", "validation"):
         prefix = "val" if split == "validation" else "train"
         for key, value in metrics[split].items():
-            if key == "mae":
+            if isinstance(value, dict):
                 flattened.update(
-                    {f"{prefix}/mae/{target}": error for target, error in value.items()}
+                    {
+                        f"{prefix}/{key}/{target}": error
+                        for target, error in value.items()
+                    }
                 )
             elif key in ("seconds", "first_batch_seconds", "images_per_second"):
                 flattened[f"timing/{prefix}_{key}"] = value
@@ -84,6 +87,14 @@ def wandb_summary(summary: dict[str, Any]) -> dict[str, Any]:
                     for target, error in value.items()
                 }
             )
+        elif key == "best_validation_distribution":
+            for metric, targets in value.items():
+                result.update(
+                    {
+                        f"val/best_checkpoint_{metric}/{target}": score
+                        for target, score in targets.items()
+                    }
+                )
         else:
             result[key] = value
     return result

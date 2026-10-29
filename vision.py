@@ -5,6 +5,7 @@ Install the optional `vision` dependencies for training or checkpoint inference.
 
 import hashlib
 import io
+import math
 from pathlib import Path
 from typing import Annotated, Any, Literal, cast
 
@@ -13,7 +14,15 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from torch import nn
 
 from predictors import Predictor
-from schemas import FIELDS, ImageInput, Nutrition, Prediction, PredictorConfig
+from schemas import (
+    FIELDS,
+    ImageInput,
+    Nutrition,
+    NutritionInterval,
+    Prediction,
+    PredictorConfig,
+    SignedNutrition,
+)
 
 BACKBONES = {
     "resnet": "resnet152.a1_in1k",
@@ -21,6 +30,7 @@ BACKBONES = {
     "dino": "vit_base_patch16_dinov3.lvd1689m",
 }
 TARGETS = (*FIELDS, "mass_g")
+NORMAL_95_Z = 1.959963984540054
 
 
 class TrainConfig(BaseModel):
@@ -56,7 +66,9 @@ class TrainConfig(BaseModel):
     ] = (0.9, 0.999)
     eps: float = Field(default=1e-8, gt=0)
     scheduler: Literal["cosine"] = "cosine"
-    loss: Literal["standardized_smooth_l1"] = "standardized_smooth_l1"
+    loss: Literal["standardized_smooth_l1", "gaussian_nll"] = "standardized_smooth_l1"
+    gaussian_min_std: float = Field(default=1e-3, gt=0)
+    gaussian_initial_std: float = Field(default=1.0, gt=0)
     huber_beta: float = Field(default=1.0, gt=0)
     grad_clip: float = Field(default=1.0, gt=0)
     augmentation: Literal["none"] = "none"
@@ -66,6 +78,8 @@ class TrainConfig(BaseModel):
     def check_targets(self):
         if self.targets != TARGETS:
             raise ValueError(f"Expected targets in order {TARGETS}")
+        if self.gaussian_initial_std <= self.gaussian_min_std:
+            raise ValueError("gaussian_initial_std must exceed gaussian_min_std")
         return self
 
 
@@ -118,19 +132,31 @@ class NutritionRegressor(nn.Module):
         )
         self.data_config = resolve_model_data_config(self.backbone)
         features = cast(int, self.backbone.num_features)
+        outputs = 2 if config.loss == "gaussian_nll" else 1
         self.heads = nn.ModuleDict(
             {
                 target: nn.Sequential(
                     nn.Linear(features, config.hidden_dim),
                     nn.ReLU(),
                     nn.Dropout(config.dropout),
-                    nn.Linear(config.hidden_dim, 1),
+                    nn.Linear(config.hidden_dim, outputs),
                 )
                 if config.hidden_dim
-                else nn.Linear(features, 1)
+                else nn.Linear(features, outputs)
                 for target in TARGETS
             }
         )
+        if config.loss == "gaussian_nll":
+            # Every scale starts at one training-label std, independent of image.
+            initial = config.gaussian_initial_std - config.gaussian_min_std
+            raw_scale = initial + math.log(-math.expm1(-initial))
+            with torch.no_grad():
+                for head in self.heads.values():
+                    final = cast(
+                        nn.Linear, head[-1] if isinstance(head, nn.Sequential) else head
+                    )
+                    final.weight[1].zero_()
+                    final.bias[1].fill_(raw_scale)
         self.register_buffer("target_mean", torch.zeros(len(TARGETS)))
         self.register_buffer("target_std", torch.ones(len(TARGETS)))
         if config.freeze_backbone:
@@ -149,7 +175,18 @@ class NutritionRegressor(nn.Module):
                 features = self.backbone(images)
         else:
             features = self.backbone(images)
-        return torch.cat([self.heads[target](features) for target in TARGETS], dim=1)
+        outputs = [self.heads[target](features) for target in TARGETS]
+        if self.config.loss == "gaussian_nll":
+            return torch.stack(outputs, dim=1)  # [batch, target, (mean, raw_std)]
+        return torch.cat(outputs, dim=1)
+
+    def gaussian_parameters(self, output: torch.Tensor):
+        mean = output[..., 0].float()
+        std = (
+            nn.functional.softplus(output[..., 1].float())
+            + self.config.gaussian_min_std
+        )
+        return mean, std
 
     def quantities(self, normalized: torch.Tensor) -> torch.Tensor:
         return (normalized.float() * self.target_std + self.target_mean).clamp_min(0)
@@ -164,6 +201,8 @@ class VisionPredictorConfig(PredictorConfig):
     data_config: dict[str, Any]
     targets: tuple[str, ...] = TARGETS
     versions: dict[str, str]
+    loss: str = "standardized_smooth_l1"
+    uncertainty: str = "none"
 
 
 class VisionPredictor(Predictor):
@@ -192,6 +231,10 @@ class VisionPredictor(Predictor):
             device=device,
             data_config=saved["data_config"],
             versions={n: version(n) for n in ("timm", "torchvision", "pillow")},
+            loss=config.loss,
+            uncertainty="Gaussian std in backend_metadata; sigma is 95% half-width; explicit bounds use raw mean"
+            if config.loss == "gaussian_nll"
+            else "none",
         )
 
     def predict(self, image: ImageInput) -> Prediction:
@@ -200,7 +243,33 @@ class VisionPredictor(Predictor):
         with Image.open(io.BytesIO(image.data)) as decoded:
             tensor = self.transform(decoded.convert("RGB")).unsqueeze(0).to(self.device)
         with torch.inference_mode():
-            values = self.model.quantities(self.model(tensor))[0].cpu().tolist()
+            output = self.model(tensor)
+            if self.model.config.loss == "gaussian_nll":
+                normalized_mean, normalized_std = self.model.gaussian_parameters(output)
+                mean = normalized_mean * self.model.target_std + self.model.target_mean
+                std = normalized_std * self.model.target_std
+                raw = dict(zip(TARGETS, mean[0].cpu().tolist(), strict=True))
+                scales = dict(zip(TARGETS, std[0].cpu().tolist(), strict=True))
+                self.last_interval = NutritionInterval(
+                    lower=SignedNutrition(
+                        **{key: raw[key] - NORMAL_95_Z * scales[key] for key in FIELDS}
+                    ),
+                    upper=SignedNutrition(
+                        **{key: raw[key] + NORMAL_95_Z * scales[key] for key in FIELDS}
+                    ),
+                )
+                self.last_metadata = {
+                    "mass_g": max(0.0, raw["mass_g"]),
+                    "gaussian_mean": raw,
+                    "gaussian_std": scales,
+                }
+                return Prediction(
+                    mean=Nutrition(**{key: max(0.0, raw[key]) for key in FIELDS}),
+                    sigma=Nutrition(
+                        **{key: NORMAL_95_Z * scales[key] for key in FIELDS}
+                    ),
+                )
+            values = self.model.quantities(output)[0].cpu().tolist()
         quantities = dict(zip(TARGETS, values, strict=True))
         # The evaluator's established schema has four nutrients; preserve it.
         self.last_metadata = {"mass_g": quantities["mass_g"]}

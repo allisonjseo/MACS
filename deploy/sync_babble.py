@@ -30,6 +30,11 @@ def upload_run(output: Path):
     ]
     best_row = next(row for row in history if row["epoch"] == summary["best_epoch"])
     summary["best_validation_mae"] = best_row["validation"]["mae"]
+    summary["best_validation_distribution"] = {
+        key: value
+        for key, value in best_row["validation"].items()
+        if key not in ("mae", "loss") and isinstance(value, dict)
+    }
     with wandb.init(
         project=settings["wandb_project"],
         entity=settings.get("wandb_entity"),
