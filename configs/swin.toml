@@ -1,0 +1,25 @@
+# Reference: pretrained encoder + five independent regression heads.
+# Change settings explicitly with train.py fit --set key=value.
+backbone = "swin"
+pretrained = true
+freeze_backbone = true
+hidden_dim = 256
+dropout = 0.1
+seed = 42
+epochs = 30
+batch_size = 32
+workers = 4
+device = "cuda"
+precision = "float32"
+head_lr = 0.001
+backbone_lr = 1e-05
+weight_decay = 0.01
+optimizer = "adamw"
+betas = [0.9, 0.999]
+eps = 1e-08
+scheduler = "cosine"
+loss = "standardized_smooth_l1"
+huber_beta = 1.0
+grad_clip = 1.0
+augmentation = "none"
+targets = ["calories_kcal", "protein_g", "carbs_g", "fat_g", "mass_g"]

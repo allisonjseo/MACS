@@ -53,6 +53,7 @@ class Backend(StrEnum):
     mean = "mean"
     sift = "sift"
     classical = "classical"
+    vision = "vision"
 
 
 def download(relative, destination):
@@ -360,6 +361,10 @@ def run(
     output: Annotated[
         Path | None, typer.Option(help="New directory for this run")
     ] = None,
+    checkpoint: Annotated[
+        Path | None, typer.Option(help="Trained vision checkpoint (.pt)")
+    ] = None,
+    device: Annotated[str, typer.Option(help="Vision inference device")] = "cpu",
 ):
     """Run any predictor and score its answers."""
     manifest_path = (data_dir / "manifest.json").resolve()
@@ -392,6 +397,12 @@ def run(
         backend = ClassicalPredictor(manifest.training_mean)
     elif predictor == "mean":
         backend = MeanPredictor(manifest.training_mean)
+    elif predictor == "vision":
+        from vision import VisionPredictor
+
+        if checkpoint is None:
+            raise ValueError("Vision predictor requires --checkpoint")
+        backend = VisionPredictor(checkpoint, device=device)
     else:
         if not manifest.references:
             raise ValueError(

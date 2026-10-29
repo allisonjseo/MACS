@@ -62,6 +62,12 @@ the [training mean](docs/mean.md), [SIFT retrieval](docs/sift.md), and
 The [data directory layout](docs/data-layout.md) records the local Nutrition5k
 source and prepared SIFT cache structure.
 
+Supervised image baselines use **ResNet-152, Swin V2 Base, and DINOv3 ViT-B/16**
+with separate regression heads for calories, protein, carbohydrates, fat, and
+total mass. Install them with `uv sync --locked --extra vision`. See
+[`deploy/README.md`](deploy/README.md) for training, checkpoint evaluation,
+the shared train/validation split, and Babble/PSC launch scripts.
+
 Preparation and evaluation seed Python, NumPy, Polars, OpenCV, and PyTorch using the
 manifest's seed (default 42; supported range 0–2147483647). Runs use the saved
 sample order, and `--limit` always takes its first N images. OpenCV threading,
@@ -80,7 +86,8 @@ Every backend implements the same `predict(image) -> Prediction` contract in
 `predictors.py`. Dataset loading, output validation, and metrics live in `eval.py`.
 `run.py` captures run configuration and provenance and serializes all run artifacts.
 The included backends are `codex`, `mean` (training-set mean), `classical`
-(white-plate coverage), and `sift` (SIFT training-image retrieval). All inherit
+(white-plate coverage), `sift` (SIFT training-image retrieval), and `vision`
+(trained image-backbone checkpoint; requires `--checkpoint`). All inherit
 `Predictor`, a small shared interface in `predictors.py`. Pydantic data contracts
 are in `schemas.py`. The image is an `ImageInput` containing encoded image bytes
 (`data`) and a MIME type (`media_type`). The Codex adapter writes its own temporary
