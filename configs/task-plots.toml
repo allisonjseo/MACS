@@ -1,0 +1,59 @@
+# All paths are relative to the project root. No training is launched by this spec.
+population_manifest = "runs/babel/full-test/manifest.json"
+clip_zero = true
+
+[[gaussian]]
+name = "ResNet-152"
+training_run = "runs/babel/10982198-resnet"
+test_run = "runs/babel/full-test/gaussian-resnet"
+[[gaussian]]
+name = "Swin V2"
+training_run = "runs/babel/10982199-swin"
+test_run = "runs/babel/full-test/gaussian-swin"
+[[gaussian]]
+name = "DINOv3"
+training_run = "runs/babel/10982200-dino"
+test_run = "runs/babel/full-test/gaussian-dino"
+
+[[point]]
+name = "ResNet-152"
+test_run = "runs/babel/full-test/point-resnet"
+[[point]]
+name = "Swin V2"
+test_run = "runs/babel/full-test/point-swin"
+[[point]]
+name = "DINOv3"
+test_run = "runs/babel/full-test/point-dino"
+[[point]]
+name = "Training mean"
+estimate = "Training mean"
+test_run = "runs/babel/full-test/mean"
+
+[comparison]
+population_manifest = "data/nutrition5k-200/manifest.json"
+[[comparison.gaussian]]
+name = "ResNet-152"
+test_run = "runs/babel/gaussian-evaluations/10982198-resnet-200"
+[[comparison.gaussian]]
+name = "Swin V2"
+test_run = "runs/babel/gaussian-evaluations/10982199-swin-200"
+[[comparison.gaussian]]
+name = "DINOv3"
+test_run = "runs/babel/gaussian-evaluations/10982200-dino-200"
+[[comparison.point]]
+name = "ResNet-152"
+test_run = "runs/babel/test-200-resnet-best"
+[[comparison.point]]
+name = "Swin V2"
+test_run = "runs/babel/evaluations/10981364-swin-200"
+[[comparison.point]]
+name = "DINOv3"
+test_run = "runs/babel/evaluations/10981074-dino-200"
+[[comparison.point]]
+name = "Training mean"
+estimate = "Training mean"
+test_run = "runs/nutrition5k-200-mean"
+[[comparison.point]]
+name = "Luna/low"
+estimate = "Saved Luna/low"
+test_run = "runs/nutrition5k-200-gpt-6-luna-low-95pct"

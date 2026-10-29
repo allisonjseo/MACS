@@ -68,6 +68,10 @@ total mass. Install them with `uv sync --locked --extra vision`. See
 [`deploy/README.md`](deploy/README.md) for training, checkpoint evaluation,
 the shared train/validation split, and Babble/PSC launch scripts.
 
+The [calorie task-metric plotting guide](docs/task-metrics.md) documents plotnine
+quantile trade-offs, empirical underestimation risk, conditional excess calories,
+calibration, and calorie-only validation NLL on the full available overhead test set.
+
 Preparation and evaluation seed Python, NumPy, Polars, OpenCV, and PyTorch using the
 manifest's seed (default 42; supported range 0–2147483647). Runs use the saved
 sample order, and `--limit` always takes its first N images. OpenCV threading,
