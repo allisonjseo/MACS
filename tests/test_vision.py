@@ -20,6 +20,8 @@ from timm.data import resolve_model_data_config
 import eval as evaluation
 import train
 from schemas import FIELDS, Manifest, Nutrition, Sample
+from timing import estimate_runtime
+from tracking import wandb_metrics, wandb_summary
 from vision import (
     BACKBONES,
     TARGETS,
@@ -208,6 +210,8 @@ def test_tiny_training_checkpoint_and_evaluator_roundtrip(tmp_path, monkeypatch)
         "batch_size=2",
         "hidden_dim=8",
         "dropout=0",
+        "compile_backend=eager",
+        "wandb_mode=offline",
     ):
         args.extend(["--set", override])
     runner = CliRunner()
@@ -228,6 +232,14 @@ def test_tiny_training_checkpoint_and_evaluator_roundtrip(tmp_path, monkeypatch)
     metrics = json.loads((output / "metrics.jsonl").read_text())
     assert set(metrics["validation"]["mae"]) == set(TARGETS)
     checkpoint = output / "best.pt"
+    state = torch.load(checkpoint, weights_only=True)
+    assert not any("_orig_mod" in key for key in state["model"])
+    assert state["train_config"]["compile_model"] is True
+    assert (output / "wandb.json").exists()
+    summary = json.loads((output / "summary.json").read_text())
+    assert summary["first_epoch_seconds"] > 0
+    assert summary["total_seconds"] >= summary["training_seconds"]
+    assert metrics["train"]["first_batch_seconds"] > 0
     prediction_backend = VisionPredictor(checkpoint)
     test = sample(tmp_path, "test", 200)
     test_manifest = Manifest(
@@ -290,6 +302,59 @@ def test_configs_only_differ_in_backbone_and_reject_unknown_overrides():
     assert values[0] == values[1] == values[2]
     with pytest.raises(ValueError, match="known_config_key"):
         train.load_config(root / "configs/resnet.toml", ["batch_szie=4"])
+
+
+def test_wandb_sections_and_warmup_aware_estimates():
+    metrics = {
+        "epoch": 2,
+        "learning_rates": [0.001],
+        "train": {
+            "loss": 0.2,
+            "mae": {"mass_g": 5},
+            "seconds": 9,
+            "first_batch_seconds": 1,
+            "images_per_second": 30,
+        },
+        "validation": {
+            "loss": 0.3,
+            "mae": {"mass_g": 6},
+            "seconds": 3,
+            "first_batch_seconds": 0.2,
+            "images_per_second": 20,
+        },
+        "timing": {"epoch_seconds": 12},
+    }
+    flattened = wandb_metrics(metrics)
+    assert flattened["train/loss"] == 0.2
+    assert flattened["val/loss"] == 0.3
+    assert flattened["val/mae/mass_g"] == 6
+    assert flattened["timing/train_seconds"] == 9
+    assert flattened["timing/val_images_per_second"] == 20
+    assert not any(k.startswith("validation/") for k in flattened)
+    assert all(
+        k.startswith("timing/")
+        for k in flattened
+        if k.endswith(("seconds", "images_per_second"))
+    )
+    summary = wandb_summary(
+        {
+            "total_seconds": 300,
+            "training_seconds": 280,
+            "best_validation_loss": 0.1,
+            "best_epoch": 9,
+        }
+    )
+    assert summary == {
+        "timing/total_seconds": 300,
+        "timing/training_seconds": 280,
+        "val/best_loss": 0.1,
+        "val/best_epoch": 9,
+    }
+    estimate = estimate_runtime([90, 9, 11, 10], 30, 130)
+    assert estimate["steady_epoch_seconds"] == 10
+    assert estimate["estimated_remaining_seconds"] == 260
+    assert estimate["estimated_total_seconds"] == 390
+    assert estimate_runtime([90, 9], 2, 100)["estimated_remaining_seconds"] == 0
 
 
 def test_deployment_shell_syntax_and_psc_arguments(tmp_path, monkeypatch):

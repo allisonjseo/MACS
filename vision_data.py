@@ -6,6 +6,7 @@ import io
 import math
 import os
 import random
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Literal
 from urllib.error import HTTPError
@@ -56,7 +57,13 @@ class TrainingManifest(BaseModel):
         return self
 
 
-def prepare_training(source: Path, output: Path, seed: int, validation_fraction: float):
+def prepare_training(
+    source: Path,
+    output: Path,
+    seed: int,
+    validation_fraction: float,
+    download_workers: int = 1,
+):
     # Reuse the established official download URL and atomic download helper.
     from eval import download
     from run import write_json
@@ -89,8 +96,10 @@ def prepare_training(source: Path, output: Path, seed: int, validation_fraction:
         splits[split] = set(path.read_text().split())
     if splits["train"] & splits["test"]:
         raise ValueError("Official training/test IDs overlap")
-    samples, missing = [], []
-    for dish in tqdm(sorted(splits["train"] & labels.keys()), desc="Training photos"):
+    if not 1 <= download_workers <= 64:
+        raise ValueError("download_workers must be between 1 and 64")
+
+    def prepare_photo(dish):
         relative = f"imagery/realsense_overhead/{dish}/rgb.png"
         path = source / relative
         # Also reuse photos downloaded by the existing evaluation prepare command.
@@ -106,16 +115,27 @@ def prepare_training(source: Path, output: Path, seed: int, validation_fraction:
         except HTTPError as error:
             if error.code != 404:
                 raise
-            missing.append(dish)
-            continue
-        samples.append(
-            TrainingSample(
-                id=dish,
-                image=os.path.relpath(path, output.parent),
-                image_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
-                target=labels[dish],
-            )
+            return dish, None
+        return dish, TrainingSample(
+            id=dish,
+            image=os.path.relpath(path, output.parent),
+            image_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+            target=labels[dish],
         )
+
+    samples, missing = [], []
+    candidates = sorted(splits["train"] & labels.keys())
+    # Preserve sorted order regardless of download completion order.
+    with ThreadPoolExecutor(max_workers=download_workers) as pool:
+        for dish, prepared in tqdm(
+            pool.map(prepare_photo, candidates),
+            total=len(candidates),
+            desc="Training photos",
+        ):
+            if prepared is None:
+                missing.append(dish)
+            else:
+                samples.append(prepared)
     if len(samples) < 2:
         raise ValueError("Need at least two available training photos")
     random.Random(seed).shuffle(samples)

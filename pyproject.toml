@@ -17,9 +17,11 @@ dependencies = [
 
 [project.optional-dependencies]
 vision = [
+    "codetiming>=1.4,<2",
     "pillow>=11",
     "timm>=1.0.20,<2",
     "torchvision>=0.20",
+    "wandb>=0.22,<1",
 ]
 
 [tool.uv]

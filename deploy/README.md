@@ -24,7 +24,9 @@ a frozen encoder (including BatchNorm statistics), the heads above, seed 42,
 30 epochs, batch size 32, four loader workers, one CUDA GPU, float32, AdamW
 (head LR 0.001, backbone LR 0.00001 when unfrozen, weight decay 0.01,
 betas 0.9/0.999, epsilon 1e-8), cosine decay to zero, gradient clipping at 1.0,
-and Smooth L1 with beta 1 on standardized targets. Each quantity has equal loss
+and Smooth L1 with beta 1 on standardized targets. `torch.compile` is enabled
+with Inductor, default mode, fullgraph capture, and dynamic batch shapes; W&B
+logging defaults to online in the `macs-nutrition5k` project. Each quantity has equal loss
 weight after standardization. Target means and population standard deviations
 come **only from the training partition**, with a 1e-6 standard deviation floor.
 There is no early stopping, accumulation, batch dropping, augmentation, or
@@ -122,26 +124,86 @@ may require a PyTorch/CUDA build with Volta support; verify the chosen environme
 and disclose that environment change before launching. The supplied environment
 uses `uv.lock` and does not load PSC's older PyTorch modules automatically.
 
-## Babble
+## Babel (Babble)
 
-There was no `babble` entry in the local SSH config. Until its hostname and
-scheduler are supplied, use the foreground launcher **on Babble**, inside a GPU
-allocation if one is required:
+The cluster connection is `cyrils@login.babel.cs.cmu.edu` with
+`~/.ssh/id_ed25519`. It was found in existing deployment configurations and
+verified over SSH. The launcher submits one Slurm job to `preempt`, account
+`agu`, QoS `preempt_qos`, and runs all three models **serially on the same GPU**.
+Defaults are one H200, four CPUs, 32 GiB host memory, four hours, no requeue.
+Set `GPU_CONSTRAINT=L40S` to select an L40S instead; report hardware changes
+alongside the training configuration before launch.
 
 ```sh
-# Substitute the actual Babble alias and remote project directory.
-bash deploy/sync.sh YOUR_BABBLE_ALIAS /absolute/project/path/MACS
-# On Babble:
-bash deploy/setup.sh
-.venv/bin/python train.py prepare --source-dir data/nutrition5k \
-  --output data/nutrition5k-training/manifest.json
-bash deploy/babble.sh data/nutrition5k-training/manifest.json runs/babble
+# On Babel, after staging the checkout and installing the environment:
+.venv/bin/python train.py prepare --source-dir /home/cyrils/macs/data/nutrition5k \
+  --output /home/cyrils/macs/data/training/manifest.json --download-workers 16
+GPU_CONSTRAINT=L40S bash deploy/babble.sh \
+  /home/cyrils/macs/data/training/manifest.json /home/cyrils/macs/runs \
+  --set wandb_mode=offline \
+  --set wandb_entity=sharma-cyril-carnegie-mellon-university \
+  --set wandb_group=babel-compiled-20261029
 ```
 
-This trains the three models serially on one GPU. `RUN_ID` optionally sets the
-output prefix. `PYTHON` optionally selects an existing compatible interpreter
-for either deployment launcher. Scheduler-specific Babble submission is not
-configured without knowing that system's scheduler and resource names.
+`BABEL_ACCOUNT`, `PARTITION`, `QOS`, `GPU_CONSTRAINT`, `CPUS`, `MEMORY`, and
+`WALLTIME` override scheduler settings. `PYTHON` selects the training interpreter.
+Outputs are `OUTPUT_ROOT/JOB_ID-MODEL`, logs are under `OUTPUT_ROOT/logs`,
+and `JOB_ID-suite-summary.json` records wall-clock process time per model.
+Caches live next to the staged checkout, under `cache/`. No credentials are
+copied to the cluster by these scripts.
+
+## W&B and runtime measurements
+
+The project is
+[macs-nutrition5k](https://forge.coreweave.com/wandb/sharma-cyril-carnegie-mellon-university/macs-nutrition5k).
+`wandb_mode` is explicit (`online`, `offline`, or `disabled`); failures do not
+silently disable logging. `wandb_project`, `wandb_entity`, and `wandb_group` are
+recorded in the resolved config and can be overridden with `--set`. Each model
+gets its own run with the full config. Loss and per-target MAE are grouped
+under `train/` and `val/`, learning rates under `train/lr/`, and **all** authored
+timing/throughput metrics and timing summaries under `timing/`.
+Images and checkpoint weights are not uploaded automatically.
+
+For Babel, use **offline** records and sync from the local machine so the W&B
+key stays local:
+
+```sh
+# On this machine, fetch logs/metrics/W&B records (excludes large .pt files)
+# and upload the completed JSON logs to their configured W&B project.
+bash deploy/fetch_babble.sh
+```
+
+The fetch script accepts a local output directory (default `runs/babel`) and
+`BABEL_HOST`, `BABEL_IDENTITY`, `BABEL_OUTPUT` overrides. Authenticate W&B locally
+using the normal SDK environment or login. `wandb.json` records run identity;
+`summary.json` contains setup time, total fit time, training-loop time, first
+epoch duration, and mean duration of later epochs. Epoch metrics include
+CUDA-synchronized train/validation durations, first-batch times and checkpoint
+I/O time. The first epoch includes lazy compilation and warm-up; later epochs
+provide a steady-state comparison. This does **not** isolate pure compiler time
+from other first-epoch costs. `total_seconds` excludes W&B final synchronization;
+the suite wall-clock timing includes the complete child process.
+
+Named phases use [codetiming](https://github.com/realpython/codetiming), with CUDA
+synchronization around measured device work. Every epoch reports
+`timing/estimated_remaining_seconds` and `timing/estimated_total_seconds` based
+on the median of the latest five completed epochs, excluding the first warm-up
+epoch once another epoch exists. Low/high remaining-time estimates use the
+minimum/maximum of those recent durations; they are heuristic ranges.
+
+`fetch_babble.sh` replays the authoritative JSON logs through the local W&B SDK,
+so even runs already in flight when reporting changed get consistent metric
+sections and historical ETA estimates. Completed uploads are marked locally to
+avoid duplicate uploads. Remote SDK system monitoring remains in the fetched
+offline records; replay disables local-machine system monitoring to avoid
+reporting laptop utilization as cluster utilization.
+
+Compilation is in place (`nn.Module.compile`, which calls `torch.compile`),
+so checkpoint state keys stay compatible with eager inference. With the default
+`compile_fullgraph=true`, graph breaks raise errors. Disabling compilation,
+changing its backend/mode, or changing precision must be an explicit, reported
+configuration change. `compile_backend=eager` is used only in the tiny CPU test;
+actual training uses Inductor.
 
 ## Artifacts and evaluation
 

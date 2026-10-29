@@ -37,6 +37,15 @@ class TrainConfig(BaseModel):
     workers: int = Field(default=4, ge=0)
     device: str = "cuda"
     precision: Literal["float32", "float16", "bfloat16"] = "float32"
+    compile_model: bool = True
+    compile_backend: Literal["inductor", "eager"] = "inductor"
+    compile_mode: Literal["default", "reduce-overhead", "max-autotune"] = "default"
+    compile_fullgraph: bool = True
+    compile_dynamic: bool = True
+    wandb_mode: Literal["online", "offline", "disabled"] = "online"
+    wandb_project: str = "macs-nutrition5k"
+    wandb_entity: str | None = None
+    wandb_group: str = "pretrained-heads"
     head_lr: float = Field(default=1e-3, gt=0)
     backbone_lr: float = Field(default=1e-5, gt=0)
     weight_decay: float = Field(default=0.01, ge=0)
@@ -76,6 +85,18 @@ def model_data_config(config: TrainConfig) -> dict[str, Any]:
     if pretrained is None:
         raise ValueError("Backbone is unavailable in the installed timm")
     return resolve_data_config({}, pretrained_cfg=pretrained.to_dict())
+
+
+def compile_for_training(model: nn.Module, config: TrainConfig):
+    if config.compile_model:
+        # Compile in place: state_dict keys stay compatible with eager inference.
+        # fullgraph=True makes graph breaks fail instead of silently running eager.
+        model.compile(
+            backend=config.compile_backend,
+            mode=config.compile_mode,
+            fullgraph=config.compile_fullgraph,
+            dynamic=config.compile_dynamic,
+        )
 
 
 class NutritionRegressor(nn.Module):

@@ -1,17 +1,29 @@
 #!/usr/bin/env bash
-# Foreground, single-GPU launcher; no scheduler/hostname assumptions about Babble.
+# Submit on Babel: cyrils@login.babel.cs.cmu.edu.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 if (( $# < 2 )); then
     echo 'Usage: bash deploy/babble.sh MANIFEST OUTPUT_ROOT [train.py fit options]' >&2
-    echo 'Run on Babble, inside a GPU allocation if that system requires one.' >&2
     exit 2
 fi
 manifest=$1
 output_root=$2
 shift 2
-run_id=${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}
-# Run serially on one visible GPU; each model receives its own run directory.
+mkdir -p "$output_root/logs"
+python=${PYTHON:-.venv/bin/python}
+options=(
+    --parsable --account="${BABEL_ACCOUNT:-agu}"
+    --partition="${PARTITION:-preempt}" --qos="${QOS:-preempt_qos}"
+    --gres=gpu:1 --constraint="${GPU_CONSTRAINT:-H200}"
+    --ntasks=1 --cpus-per-task="${CPUS:-4}" --mem="${MEMORY:-32G}"
+    --time="${WALLTIME:-04:00:00}" --no-requeue --job-name=macs-vision
+    --chdir="$PWD" --output="$output_root/logs/%j.out" --error="$output_root/logs/%j.err"
+)
+printf 'Scheduler configuration:'
+printf ' %q' "${options[@]}"
+printf '\n'
 for model in resnet swin dino; do
-    bash deploy/run.sh "$model" "$manifest" "$output_root/$run_id-$model" "$@"
+    "$python" train.py fit --config "configs/$model.toml" --manifest "$manifest" \
+        --output "$output_root/SLURM_JOB_ID-$model" "$@" --dry-run
 done
+sbatch "${options[@]}" deploy/babble.sbatch "$manifest" "$output_root" "$@"

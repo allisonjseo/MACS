@@ -6,6 +6,7 @@ import json
 import os
 import platform
 import random
+import time
 import tomllib
 from importlib.metadata import version
 from pathlib import Path
@@ -20,11 +21,14 @@ from tqdm import tqdm
 
 from determinism import configure_determinism
 from run import PROJECT_DIR, GitRevision
+from timing import estimate_runtime, phase_timer
+from tracking import wandb_metrics, wandb_session, wandb_summary
 from vision import (
     BACKBONES,
     TARGETS,
     NutritionRegressor,
     TrainConfig,
+    compile_for_training,
     create_transform,
     model_data_config,
 )
@@ -77,9 +81,12 @@ def prepare(
     output: Path = Path("data/nutrition5k-training/manifest.json"),
     seed: Annotated[int, typer.Option(min=0, max=2**31 - 1)] = 42,
     validation_fraction: Annotated[float, typer.Option(min=0.001, max=0.999)] = 0.2,
+    download_workers: Annotated[int, typer.Option(min=1, max=64)] = 1,
 ):
     """Cache all available official training RGBs; create a train/validation split."""
-    manifest = prepare_training(source_dir, output, seed, validation_fraction)
+    manifest = prepare_training(
+        source_dir, output, seed, validation_fraction, download_workers
+    )
     print(
         f"Prepared {output}: {len(manifest.train)} train, {len(manifest.validation)} validation"
     )
@@ -91,6 +98,15 @@ def epoch_pass(model, loader, device, config, optimizer=None, scaler=None):
     total_loss, count = 0.0, 0
     errors = torch.zeros(len(TARGETS), dtype=torch.float64)
     dtype = torch.float16 if config.precision == "float16" else torch.bfloat16
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    timer = phase_timer("train" if training else "val")
+    first_batch_timer = phase_timer(
+        "train_first_batch" if training else "val_first_batch"
+    )
+    timer.start()
+    first_batch_timer.start()
+    first_batch_seconds = None
     for images, targets in tqdm(loader, desc="Train" if training else "Validation"):
         images, targets = images.to(device), targets.to(device)
         if training:
@@ -130,9 +146,19 @@ def epoch_pass(model, loader, device, config, optimizer=None, scaler=None):
             .sum(0)
             .cpu()
         )
+        if first_batch_seconds is None:
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            first_batch_seconds = first_batch_timer.stop()
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    elapsed = timer.stop()
     return {
         "loss": total_loss / count,
         "mae": dict(zip(TARGETS, (errors / count).tolist(), strict=True)),
+        "seconds": elapsed,
+        "first_batch_seconds": first_batch_seconds,
+        "images_per_second": count / elapsed,
     }
 
 
@@ -148,12 +174,13 @@ def fit(
     dry_run: bool = False,
 ):
     """Print the exact resolved configuration, then train (or only print with --dry-run)."""
+    fit_started = time.perf_counter()
     settings, changes = load_config(config, overrides or [])
     manifest = manifest.resolve()
     raw_manifest = manifest.read_bytes()
     data = TrainingManifest.model_validate_json(raw_manifest)
     preprocessing = model_data_config(settings)
-    chosen = {
+    chosen: dict[str, Any] = {
         "config_file": str(config.resolve()),
         "changes_from_reference": changes,
         "train_config": settings.model_dump(mode="json"),
@@ -170,7 +197,10 @@ def fit(
         "prediction_postprocessing": "inverse standardization, clamp minimum to zero",
         "selection": "minimum validation standardized Smooth L1 loss",
         "batch_policy": "shuffle train; keep incomplete batches; no gradient accumulation",
-        "monitoring": "stdout, metrics.jsonl, config.json, best.pt, last.pt",
+        "monitoring": "stdout, metrics.jsonl, config.json, best.pt, last.pt, W&B (explicit mode)",
+        "timing_policy": "CUDA-synchronized train/validation passes; first batches include lazy compilation; epoch wall time includes checkpoint I/O",
+        "timing_tool": "codetiming named phase timers + perf_counter wall clock",
+        "eta_policy": "median of last five completed epochs; excludes first epoch after warm-up; low/high use recent min/max, not confidence bounds",
         "hardware": {
             "device": settings.device,
             "gpu_count": 1 if settings.device.startswith("cuda") else 0,
@@ -204,6 +234,7 @@ def fit(
     model.target_mean.copy_(targets.mean(0))
     model.target_std.copy_(targets.std(0, unbiased=False).clamp_min(1e-6))
     model.to(device)
+    compile_for_training(model, settings)
     transform = create_transform(preprocessing)
     generator = torch.Generator().manual_seed(settings.seed)
     loaders = [
@@ -260,6 +291,9 @@ def fit(
     )
     if device.type == "cuda":
         chosen["hardware"]["gpu_name"] = torch.cuda.get_device_name(device)
+    if settings.wandb_mode != "disabled":
+        chosen["dependencies"]["wandb"] = version("wandb")
+    chosen["dependencies"]["codetiming"] = version("codetiming")
     output.mkdir(parents=True, exist_ok=False)
     save_json(output / "config.json", chosen)
     print(
@@ -272,45 +306,91 @@ def fit(
         ),
         flush=True,
     )
-    best = float("inf")
-    for epoch in range(1, settings.epochs + 1):
-        rates = scheduler.get_last_lr()
-        training = epoch_pass(model, loaders[0], device, settings, optimizer, scaler)
-        validation = epoch_pass(model, loaders[1], device, settings)
-        scheduler.step()
-        metrics = {
-            "epoch": epoch,
-            "learning_rates": rates,
-            "train": training,
-            "validation": validation,
-        }
-        with (output / "metrics.jsonl").open("a") as stream:
-            stream.write(json.dumps(metrics, allow_nan=False) + "\n")
-        improved = validation["loss"] < best
-        best = min(best, validation["loss"])
-        checkpoint = {
-            "format_version": 1,
-            "model": model.state_dict(),
-            "train_config": settings.model_dump(mode="json"),
-            "data_config": preprocessing,
-            "epoch": epoch,
-            "validation": validation,
-            "best_validation_loss": best,
-            "manifest_sha256": chosen["manifest_sha256"],
-        }
-        for name in ["last.pt", "best.pt"] if improved else ["last.pt"]:
-            temporary = output / (name + ".tmp")
-            torch.save(checkpoint, temporary)
-            temporary.replace(output / name)
-        print(json.dumps(metrics), flush=True)
-    save_json(
-        output / "summary.json",
-        {
+    with wandb_session(settings, chosen, output) as wb_run:
+        if wb_run is not None:
+            save_json(
+                output / "wandb.json",
+                {
+                    "url": wb_run.url,
+                    "id": wb_run.id,
+                    "entity": wb_run.entity,
+                    "project": wb_run.project,
+                },
+            )
+        setup_seconds = time.perf_counter() - fit_started
+        training_started = time.perf_counter()
+        epoch_seconds = []
+        best = float("inf")
+        best_epoch = None
+        for epoch in range(1, settings.epochs + 1):
+            epoch_timer = phase_timer("epoch")
+            epoch_timer.start()
+            rates = scheduler.get_last_lr()
+            training = epoch_pass(
+                model, loaders[0], device, settings, optimizer, scaler
+            )
+            validation = epoch_pass(model, loaders[1], device, settings)
+            scheduler.step()
+            improved = validation["loss"] < best
+            if improved:
+                best, best_epoch = validation["loss"], epoch
+            checkpoint = {
+                "format_version": 1,
+                "model": model.state_dict(),
+                "train_config": settings.model_dump(mode="json"),
+                "data_config": preprocessing,
+                "epoch": epoch,
+                "validation": validation,
+                "best_validation_loss": best,
+                "manifest_sha256": chosen["manifest_sha256"],
+            }
+            with phase_timer("checkpoint") as checkpoint_timer:
+                for name in ["last.pt", "best.pt"] if improved else ["last.pt"]:
+                    temporary = output / (name + ".tmp")
+                    torch.save(checkpoint, temporary)
+                    temporary.replace(output / name)
+            checkpoint_seconds = checkpoint_timer.last
+            elapsed = epoch_timer.stop()
+            epoch_seconds.append(elapsed)
+            metrics = {
+                "epoch": epoch,
+                "learning_rates": rates,
+                "train": training,
+                "validation": validation,
+                "timing": {
+                    "epoch_seconds": elapsed,
+                    "checkpoint_seconds": checkpoint_seconds,
+                    "elapsed_training_seconds": time.perf_counter() - training_started,
+                    "elapsed_total_seconds": time.perf_counter() - fit_started,
+                    **estimate_runtime(
+                        epoch_seconds,
+                        settings.epochs,
+                        time.perf_counter() - fit_started,
+                    ),
+                },
+            }
+            with (output / "metrics.jsonl").open("a") as stream:
+                stream.write(json.dumps(metrics, allow_nan=False) + "\n")
+            if wb_run is not None:
+                wb_run.log(wandb_metrics(metrics), step=epoch)
+            print(json.dumps(metrics), flush=True)
+        summary = {
             "epochs": settings.epochs,
             "best_validation_loss": best,
+            "best_epoch": best_epoch,
             "checkpoint": "best.pt",
-        },
-    )
+            "setup_seconds": setup_seconds,
+            "training_seconds": time.perf_counter() - training_started,
+            "total_seconds": time.perf_counter() - fit_started,
+            "first_epoch_seconds": epoch_seconds[0],
+            "mean_steady_epoch_seconds": sum(epoch_seconds[1:]) / len(epoch_seconds[1:])
+            if len(epoch_seconds) > 1
+            else None,
+        }
+        save_json(output / "summary.json", summary)
+        if wb_run is not None:
+            wb_run.summary.update(wandb_summary(summary))
+        print("Training summary: " + json.dumps(summary), flush=True)
 
 
 def main():
