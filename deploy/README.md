@@ -147,6 +147,9 @@ GPU_CONSTRAINT=L40S bash deploy/babble.sh \
 
 `BABEL_ACCOUNT`, `PARTITION`, `QOS`, `GPU_CONSTRAINT`, `CPUS`, `MEMORY`, and
 `WALLTIME` override scheduler settings. `PYTHON` selects the training interpreter.
+`MACS_MODELS="swin dino"` selects a subset when restarting incomplete runs;
+the default is all three models. Each model uses a compiler-cache directory
+scoped to its job and model so restarts retain cold-compilation measurements.
 Outputs are `OUTPUT_ROOT/JOB_ID-MODEL`, logs are under `OUTPUT_ROOT/logs`,
 and `JOB_ID-suite-summary.json` records wall-clock process time per model.
 Caches live next to the staged checkout, under `cache/`. No credentials are

@@ -22,7 +22,14 @@ def main():
         environment.setdefault(name, str(directory))
     job_id = os.environ["SLURM_JOB_ID"]
     results = []
-    for model in ("resnet", "swin", "dino"):
+    models = environment.get("MACS_MODELS", "resnet swin dino").split()
+    if not models or any(model not in {"resnet", "swin", "dino"} for model in models):
+        raise ValueError("MACS_MODELS must select resnet, swin, and/or dino")
+    for model in models:
+        # Isolate cold compilation between jobs, including restarts after preemption.
+        environment["TORCHINDUCTOR_CACHE_DIR"] = str(
+            workspace / "cache/inductor" / f"{job_id}-{model}"
+        )
         output = Path(output_root) / f"{job_id}-{model}"
         command = [
             sys.executable,

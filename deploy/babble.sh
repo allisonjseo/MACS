@@ -22,7 +22,9 @@ options=(
 printf 'Scheduler configuration:'
 printf ' %q' "${options[@]}"
 printf '\n'
-for model in resnet swin dino; do
+read -r -a models <<< "${MACS_MODELS:-resnet swin dino}"
+for model in "${models[@]}"; do
+    case "$model" in resnet|swin|dino) ;; *) echo "Unknown model: $model" >&2; exit 2 ;; esac
     "$python" train.py fit --config "configs/$model.toml" --manifest "$manifest" \
         --output "$output_root/SLURM_JOB_ID-$model" "$@" --dry-run
 done
