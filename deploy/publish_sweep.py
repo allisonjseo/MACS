@@ -33,6 +33,8 @@ def publish(plan_file: Path, results: Path):
             counts[state] += 1
             params = proposal["params"]
             url_file = output / "wandb-uploaded.json"
+            if not url_file.exists():
+                url_file = output / "wandb-live.json"
             url = json.loads(url_file.read_text())["url"] if url_file.exists() else None
             score = summary.get("best_selection_score")
             seconds = summary.get("total_seconds")
@@ -65,6 +67,7 @@ def publish(plan_file: Path, results: Path):
         tags=["optuna", "overview"],
         id=identity.get("id"),
         resume="allow" if identity else None,
+        reinit="create_new",
         config=plan,
         mode="online",
         dir=str(results.resolve()),

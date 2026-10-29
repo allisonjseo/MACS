@@ -1,4 +1,4 @@
-"""Relay finished Babel trial histories and status snapshots to W&B locally."""
+"""Relay live Babel epoch metrics and status snapshots to W&B locally."""
 
 import argparse
 import hashlib
@@ -7,11 +7,30 @@ import subprocess
 import time
 from pathlib import Path
 
+from live_sweep import LiveRelay
 from publish_sweep import publish
-from sync_babble import upload_run
+
+SYNC_FILTERS = [
+    "--exclude=wandb/",
+    "--include=*/",
+    "--include=*.json",
+    "--include=*.jsonl",
+    "--include=*.csv",
+    "--include=*.out",
+    "--include=*.err",
+    "--exclude=*",
+]
 
 
 def watch(plan, results, jobs, identity):
+    relay = LiveRelay()
+    try:
+        watch_loop(plan, results, jobs, identity, relay)
+    finally:
+        relay.close()
+
+
+def watch_loop(plan, results, jobs, identity, relay):
     host = "cyrils@login.babel.cs.cmu.edu"
     remote = "/home/cyrils/macs/optuna-pilot/"
     ssh = ["ssh", "-i", str(identity), "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
@@ -19,24 +38,27 @@ def watch(plan, results, jobs, identity):
     queue_drained = False
     deadline = time.monotonic() + 3 * 60 * 60
     while time.monotonic() < deadline:
-        subprocess.run(
+        fetched = subprocess.run(
             [
                 "rsync",
                 "-az",
-                "--exclude=*.pt",
-                "--exclude=study.db*",
-                "--exclude=wandb/",
+                *SYNC_FILTERS,
                 "-e",
                 shlex.join(ssh),
                 f"{host}:{remote}",
                 str(results.resolve()) + "/",
             ],
-            check=True,
         )
+        if fetched.returncode:
+            print(
+                f"Fetch failed ({fetched.returncode}); retrying in 15 seconds without closing online runs.",
+                flush=True,
+            )
+            time.sleep(15)
+            continue
         for backbone in ("resnet", "swin", "dino"):
-            for summary in sorted((results / backbone).glob("trial-*/summary.json")):
-                if (summary.parent / "wandb.json").exists():
-                    upload_run(summary.parent)
+            for output in sorted((results / backbone).glob("trial-*")):
+                relay.update(output)
         digest = hashlib.sha256()
         for pattern in ("*/trial-*/config.json", "*/trial-*/summary.json"):
             for path in sorted(results.glob(pattern)):
@@ -47,6 +69,7 @@ def watch(plan, results, jobs, identity):
             publish(plan, results)
             previous = current
         if queue_drained:
+            relay.close()
             print(
                 "All submitted jobs left the queue; final fetched records uploaded.",
                 flush=True,
@@ -54,16 +77,23 @@ def watch(plan, results, jobs, identity):
             return
         queue = subprocess.run(
             [*ssh, host, "squeue --noheader --jobs=" + ",".join(jobs) + " --format=%i"],
-            check=True,
             capture_output=True,
             text=True,
         )
+        if queue.returncode:
+            print(
+                f"Queue check failed: {queue.stderr.strip()}; retrying in 15 seconds.",
+                flush=True,
+            )
+            time.sleep(15)
+            continue
         if not queue.stdout.strip():
             # Fetch again after observing termination, avoiding a last-summary race.
             queue_drained = True
             continue
         print("Remaining jobs: " + queue.stdout.replace("\n", " "), flush=True)
-        time.sleep(60)
+        time.sleep(15)
+    relay.close()
     raise TimeoutError(
         "Relay reached its three-hour limit; inspect Slurm and fetched records"
     )

@@ -136,9 +136,25 @@ For automatic uploads while the submitted jobs run, use the bounded local relay:
   runs/babel/optuna-pilot JOB_ID_RESNET JOB_ID_SWIN JOB_ID_DINO
 ```
 
-It fetches JSON/CSV/log records every minute, skips checkpoints and SQLite files,
-uploads newly completed/pruned trials, and refreshes the overview when fetched
-configs or summaries change. It stops after the jobs leave the queue (with a final
-fetch), or at a three-hour limit. It never launches or restarts training. Credentials
-stay on the local machine. The relay requires the local process and network to
-remain available; its snapshots are not continuous epoch-level online logging.
+It polls JSON/CSV/log records every 15 seconds, skipping checkpoints and SQLite
+files. `live_sweep.py` opens an online W&B run as soon as a trial's config and
+identity are available, and keeps it open while new epoch records arrive. Separate
+run objects (`reinit="create_new"`) allow concurrent backbones to stream without
+finishing one another. Each new epoch is explicitly committed, so the latest
+point does not wait for the next epoch to appear. Charts retain their original
+`train/`, `val/`, and `timing/` namespaces.
+
+Resume uses the same run ID and W&B's next history step; previously logged epochs
+are skipped. Incomplete JSON appends at EOF are deferred until the next poll.
+Completed/pruned runs receive their final selected-checkpoint summaries and tags
+only once the complete final history has arrived. The overview refreshes when
+configs or final summaries change and links to the live trial runs.
+
+The relay stops after the jobs leave the queue (with a final fetch), or at a
+three-hour limit. It never launches or restarts training. Credentials stay on the
+local machine. The local process and network must remain available. Updates are
+epoch-level, with polling plus upload latency; they are not batch-level logs or a
+remote terminal stream. If the relay stops before a source summary arrives, the
+online run records `relay_stopped_without_source_summary`; its failed logging
+process does not by itself establish that remote training failed. A later relay
+can resume that same W&B run.
