@@ -150,6 +150,9 @@ GPU_CONSTRAINT=L40S bash deploy/babble.sh \
 `MACS_MODELS="swin dino"` selects a subset when restarting incomplete runs;
 the default is all three models. Each model uses a compiler-cache directory
 scoped to its job and model so restarts retain cold-compilation measurements.
+Set `MACS_COMPILE_CACHE` explicitly to reuse an earlier cache after preemption;
+report that run as a warm-cache run. The resolved cache directory is recorded
+in the run config.
 Outputs are `OUTPUT_ROOT/JOB_ID-MODEL`, logs are under `OUTPUT_ROOT/logs`,
 and `JOB_ID-suite-summary.json` records wall-clock process time per model.
 Caches live next to the staged checkout, under `cache/`. No credentials are

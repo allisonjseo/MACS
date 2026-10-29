@@ -200,10 +200,12 @@ def fit(
         "monitoring": "stdout, metrics.jsonl, config.json, best.pt, last.pt, W&B (explicit mode)",
         "timing_policy": "CUDA-synchronized train/validation passes; first batches include lazy compilation; epoch wall time includes checkpoint I/O",
         "timing_tool": "codetiming named phase timers + perf_counter wall clock",
+        "compiler_cache_dir": os.environ.get("TORCHINDUCTOR_CACHE_DIR"),
         "eta_policy": "median of last five completed epochs; excludes first epoch after warm-up; low/high use recent min/max, not confidence bounds",
         "hardware": {
             "device": settings.device,
             "gpu_count": 1 if settings.device.startswith("cuda") else 0,
+            "hostname": platform.node(),
         },
     }
     print(json.dumps(chosen, indent=2), flush=True)

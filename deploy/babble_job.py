@@ -27,8 +27,9 @@ def main():
         raise ValueError("MACS_MODELS must select resnet, swin, and/or dino")
     for model in models:
         # Isolate cold compilation between jobs, including restarts after preemption.
-        environment["TORCHINDUCTOR_CACHE_DIR"] = str(
-            workspace / "cache/inductor" / f"{job_id}-{model}"
+        environment["TORCHINDUCTOR_CACHE_DIR"] = environment.get(
+            "MACS_COMPILE_CACHE",
+            str(workspace / "cache/inductor" / f"{job_id}-{model}"),
         )
         output = Path(output_root) / f"{job_id}-{model}"
         command = [

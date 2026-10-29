@@ -73,7 +73,8 @@ def upload_run(output: Path):
 def main():
     root = Path(sys.argv[1] if len(sys.argv) > 1 else "runs/babel")
     for summary in sorted(root.glob("*-*/summary.json")):
-        upload_run(summary.parent)
+        if (summary.parent / "wandb.json").exists():
+            upload_run(summary.parent)
 
 
 if __name__ == "__main__":
