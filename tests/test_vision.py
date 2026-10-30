@@ -168,8 +168,47 @@ def test_finetuning_enables_encoder_gradients(monkeypatch):
     assert all(p.grad is not None for p in model.backbone.parameters())
 
 
-@pytest.mark.parametrize("loss", ["standardized_smooth_l1", "gaussian_nll"])
-def test_tiny_training_checkpoint_and_evaluator_roundtrip(tmp_path, monkeypatch, loss):
+@pytest.mark.parametrize(
+    "loss,segmented",
+    [
+        ("standardized_smooth_l1", False),
+        ("gaussian_nll", False),
+        ("gaussian_nll", True),
+    ],
+)
+def test_tiny_training_checkpoint_and_evaluator_roundtrip(
+    tmp_path, monkeypatch, loss, segmented
+):
+    if segmented:
+        import importlib.metadata
+
+        import segmentation
+        from segmentation import SegmentationConfig, prepare_masks
+
+        class StubSegmenter:
+            def __init__(self, config, device):
+                self.config = config
+                torch.rand(7)  # Simulate RNG consumed by pretrained model loading.
+
+            def mask(self, image):
+                mask = Image.new("L", image.size)
+                mask.paste(255, (0, 0, 4, 4))
+                mask.paste(
+                    255, (image.width - 4, image.height - 4, image.width, image.height)
+                )
+                return mask
+
+        monkeypatch.setattr(segmentation, "FoodSegmenter", StubSegmenter)
+        monkeypatch.setattr("vision.FoodSegmenter", StubSegmenter)
+        original_version = importlib.metadata.version
+        monkeypatch.setattr(
+            importlib.metadata,
+            "version",
+            lambda name: "test" if name == "transformers" else original_version(name),
+        )
+        monkeypatch.setattr(train, "version", importlib.metadata.version)
+        monkeypatch.setattr(segmentation, "version", lambda name: "test")
+
     def tiny_model(name, pretrained, num_classes):
         assert name == BACKBONES["resnet"]
         assert pretrained is False and num_classes == 0
@@ -216,6 +255,8 @@ def test_tiny_training_checkpoint_and_evaluator_roundtrip(tmp_path, monkeypatch,
         f"loss={loss}",
     ):
         args.extend(["--set", override])
+    if segmented:
+        args.extend(["--set", 'segmentation={revision="' + "a" * 40 + '"}'])
     runner = CliRunner()
     preview = runner.invoke(train.app, [*args, "--dry-run"])
     assert preview.exit_code == 0, preview.output
@@ -243,6 +284,33 @@ def test_tiny_training_checkpoint_and_evaluator_roundtrip(tmp_path, monkeypatch,
     assert summary["total_seconds"] >= summary["training_seconds"]
     assert metrics["train"]["first_batch_seconds"] > 0
     prediction_backend = VisionPredictor(checkpoint)
+    if segmented:
+        assert state["train_config"]["segmentation"]["revision"] == "a" * 40
+        assert saved["segmentation"]["samples"][0]["foreground_fraction"] > 0
+        _, mask_paths, _ = prepare_masks(
+            data.train,
+            tmp_path,
+            SegmentationConfig(revision="a" * 40),
+            tmp_path / "segmentation-masks",
+            "cpu",
+        )
+        from segmentation import apply_food_mask
+        from vision_data import NutritionDataset
+
+        dataset = NutritionDataset(
+            data.train, tmp_path, prediction_backend.transform, masks=mask_paths
+        )
+        assert prediction_backend.segmenter is not None
+        with Image.open(tmp_path / data.train[0].image) as image:
+            online = prediction_backend.transform(
+                apply_food_mask(image, prediction_backend.segmenter.mask(image))
+            )
+        torch.testing.assert_close(dataset[0][0], online)
+    else:
+        # Simulate a checkpoint written before the segmentation field existed.
+        state["train_config"].pop("segmentation", None)
+        torch.save(state, output / "legacy.pt")
+        assert VisionPredictor(output / "legacy.pt").segmenter is None
     test = sample(tmp_path, "test", 200)
     test_manifest = Manifest(
         dataset="Nutrition5k",
@@ -284,6 +352,11 @@ def test_tiny_training_checkpoint_and_evaluator_roundtrip(tmp_path, monkeypatch,
     assert records[0]["status"] == "ok"
     assert records[0]["backend_metadata"]["mass_g"] >= 0
     if loss == "gaussian_nll":
+        if segmented:
+            assert (
+                records[0]["backend_metadata"]["segmentation"]["foreground_fraction"]
+                > 0
+            )
         assert records[0]["prediction_interval"] is not None
         for key in FIELDS:
             std = records[0]["backend_metadata"]["gaussian_std"][key]
@@ -300,6 +373,16 @@ def test_tiny_training_checkpoint_and_evaluator_roundtrip(tmp_path, monkeypatch,
         == hashlib.sha256(checkpoint.read_bytes()).hexdigest()
     )
     assert prediction_backend.config.backbone == BACKBONES["resnet"]
+    if segmented:
+        warm_output = tmp_path / "warm-run"
+        warm_args = list(args)
+        warm_args[warm_args.index("--output") + 1] = str(warm_output)
+        warm_args.extend(["--set", "wandb_mode=disabled"])
+        result = runner.invoke(train.app, warm_args)
+        assert result.exit_code == 0, result.output + repr(result.exception)
+        warm = torch.load(warm_output / "best.pt", weights_only=True)
+        for name, tensor in state["model"].items():
+            torch.testing.assert_close(tensor, warm["model"][name], rtol=0, atol=0)
     repeated = runner.invoke(train.app, args)
     assert repeated.exit_code != 0
 
@@ -523,9 +606,38 @@ def test_pruned_training_finalizes_logs_and_saves_calorie_selected_checkpoint(
 
 
 @pytest.mark.parametrize("repair_append", [False, True])
+@pytest.mark.parametrize("segmented", [False, True])
 def test_epoch_resume_matches_uninterrupted_adam_dropout_and_shuffle(
-    tmp_path, monkeypatch, repair_append
+    tmp_path, monkeypatch, repair_append, segmented
 ):
+    if segmented:
+        import segmentation
+
+        resolutions = []
+
+        def resolve(config):
+            resolutions.append(config.revision)
+            return config.model_copy(update={"revision": "a" * 40})
+
+        class StubSegmenter:
+            def __init__(self, config, device):
+                assert config.revision == "a" * 40
+                torch.rand(7)
+
+            def mask(self, image):
+                mask = Image.new("L", image.size)
+                mask.paste(255, (0, 0, 12, 12))
+                return mask
+
+        monkeypatch.setattr(segmentation, "resolve_segmentation", resolve)
+        monkeypatch.setattr(segmentation, "FoodSegmenter", StubSegmenter)
+        monkeypatch.setattr(segmentation, "version", lambda name: "test")
+        original_version = train.version
+        monkeypatch.setattr(
+            train,
+            "version",
+            lambda name: "test" if name == "transformers" else original_version(name),
+        )
     monkeypatch.setattr("timm.create_model", lambda *a, **kw: TinyBackbone())
     monkeypatch.setattr(
         train, "model_data_config", lambda c: resolve_model_data_config(TinyBackbone())
@@ -554,6 +666,8 @@ def test_epoch_resume_matches_uninterrupted_adam_dropout_and_shuffle(
         "wandb_mode=disabled",
         "selection_metric=calorie_nll",
     ]
+    if segmented:
+        overrides.append('segmentation={revision="main"}')
     full = tmp_path / "full"
     train.run_training(reference, manifest, full, overrides)
     split = tmp_path / "split"
@@ -573,7 +687,20 @@ def test_epoch_resume_matches_uninterrupted_adam_dropout_and_shuffle(
         (
             split / "best.pt"
         ).unlink()  # Crash after last.pt commit, before publishing best.
+    if not segmented:
+        # Runs created before CLIPSeg had neither configuration field.
+        original = json.loads((split / "config.json").read_text())
+        original.pop("requested_train_config")
+        original["train_config"].pop("segmentation")
+        (split / "config.json").write_text(json.dumps(original))
+        checkpoint = torch.load(split / "last.pt", weights_only=True)
+        checkpoint["train_config"].pop("segmentation")
+        torch.save(checkpoint, split / "last.pt")
     summary = train.run_training(reference, manifest, split, overrides, resume=True)
+    if segmented:
+        assert resolutions == ["main", "main", "a" * 40]
+        resumed = json.loads((split / "resume-0001.json").read_text())
+        assert resumed["train_config"]["segmentation"]["revision"] == "a" * 40
     a = torch.load(full / "last.pt", weights_only=True)
     b = torch.load(split / "last.pt", weights_only=True)
     assert all(torch.equal(a["model"][k], b["model"][k]) for k in a["model"])

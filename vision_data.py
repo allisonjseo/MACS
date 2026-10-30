@@ -17,6 +17,7 @@ from torch.utils.data import Dataset
 from tqdm import tqdm
 
 from schemas import Nutrition
+from segmentation import apply_food_mask
 from vision import TARGETS
 
 
@@ -155,8 +156,15 @@ def prepare_training(
 
 
 class NutritionDataset(Dataset):
-    def __init__(self, samples: list[TrainingSample], root: Path, transform: Any):
+    def __init__(
+        self,
+        samples: list[TrainingSample],
+        root: Path,
+        transform: Any,
+        masks: dict[str, Path] | None = None,
+    ):
         self.samples, self.root, self.transform = samples, root, transform
+        self.masks = masks
 
     def __len__(self):
         return len(self.samples)
@@ -166,7 +174,11 @@ class NutritionDataset(Dataset):
 
         sample = self.samples[index]
         with Image.open(self.root / sample.image) as image:
-            tensor = self.transform(image.convert("RGB"))
+            rgb = image.convert("RGB")
+            if self.masks is not None:
+                with Image.open(self.masks[sample.id]) as mask:
+                    rgb = apply_food_mask(rgb, mask)
+            tensor = self.transform(rgb)
         target = torch.tensor([getattr(sample.target, key) for key in TARGETS])
         return tensor, target
 

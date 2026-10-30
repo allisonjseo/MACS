@@ -65,6 +65,9 @@ the [training mean](docs/mean.md), [SIFT retrieval](docs/sift.md), and
 [Codex vision baseline](docs/codex.md).
 The [data directory layout](docs/data-layout.md) records the local Nutrition5k
 source and prepared SIFT cache structure.
+To exclude test dishes whose exact ingredient set appears in official training,
+use [`filter_test_recipes.py`](filter_test_recipes.py); see the
+[recipe-disjoint test subset](docs/recipe-disjoint-test.md) instructions.
 
 Supervised image baselines use **ResNet-152, Swin V2 Base, and DINOv3 ViT-B/16**
 with separate regression heads for calories, protein, carbohydrates, fat, and
@@ -75,6 +78,10 @@ the shared train/validation split, and Babble/PSC launch scripts.
 The [calorie task-metric plotting guide](docs/task-metrics.md) documents plotnine
 quantile trade-offs, empirical underestimation risk, conditional excess calories,
 calibration, and calorie-only validation NLL on the full available overhead test set.
+
+The [CLIPSeg Gaussian variant](docs/clipseg-gaussian.md) adds fully pretrained
+food/background segmentation, retaining multiple food regions together before
+the frozen ResNet encoder. Training caches masks and learns only Gaussian heads.
 
 Preparation and evaluation seed Python, NumPy, Polars, OpenCV, and PyTorch using the
 manifest's seed (default 42; supported range 0–2147483647). Runs use the saved

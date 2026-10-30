@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="Compare Nutrition5k train and test dishes by ingredient lists and quantities.">
+<title>Nutrition5k · Ingredient overlap</title>
+<style>
+:root{--bg:#f6f6f3;--paper:#fff;--ink:#24292d;--muted:#747a7e;--line:#e0e3df;--accent:#5350a5;--soft:#eeedf8;--green:#28734f;--red:#aa493d}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 system-ui,-apple-system,sans-serif}button,input,select{font:inherit}button{cursor:pointer}button:disabled{opacity:.4;cursor:default}button:focus-visible,input:focus-visible,select:focus-visible,a:focus-visible{outline:3px solid #a7a3e7;outline-offset:2px}button{color:inherit}header{padding:17px 3vw;border-bottom:1px solid var(--line);background:var(--paper);display:flex;justify-content:space-between;gap:16px;align-items:center}.brand{font-weight:750;letter-spacing:-.5px;font-size:18px}.brand span{font-weight:400;color:var(--muted);font-size:13px;letter-spacing:0;margin-left:14px}.label{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--muted)}main{max-width:1700px;margin:auto;padding:29px 3vw}h1{font-size:34px;letter-spacing:-1.2px;font-weight:650;margin:0 0 7px;line-height:1.2}.intro{color:var(--muted);margin:0 0 23px;max-width:850px}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:13px;margin-bottom:22px}.stat{background:var(--paper);border:1px solid var(--line);border-radius:10px;padding:17px 19px}.stat strong{display:block;font-size:29px;line-height:1.2;font-weight:650;letter-spacing:-.7px}.stat span{display:block;color:var(--muted);font-size:12px;margin-top:6px}.stat small{font-size:11px;color:var(--muted)}.toolbar{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:15px}input,select,.button{padding:10px 12px;border:1px solid var(--line);background:white;border-radius:7px}.search{flex:1;min-width:210px}.search input{width:100%}.button{background:var(--paper);text-decoration:none;color:var(--ink);white-space:nowrap}.button.primary{background:var(--accent);color:white;border-color:var(--accent)}.views{display:flex;gap:4px;background:#e9eae7;padding:4px;border-radius:8px}.views button{border:0;background:none;padding:7px 13px;border-radius:5px;color:var(--muted)}.views button[aria-pressed=true]{background:white;color:var(--ink);box-shadow:0 1px 3px #0001}.workspace{display:grid;grid-template-columns:310px minmax(0,1fr);gap:18px;align-items:start}.panel{background:var(--paper);border:1px solid var(--line);border-radius:10px;overflow:hidden}.panelhead{padding:14px 18px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:10px;align-items:center}.panelhead h2{font-size:14px;margin:0;font-weight:650}.muted{color:var(--muted);font-size:12px}.queue{height:calc(100vh - 405px);min-height:370px;overflow:auto}.queueitem{width:100%;display:block;text-align:left;border:0;border-bottom:1px solid #eceeeb;padding:14px 16px;background:white}.queueitem:hover{background:#f7f7fc}.queueitem[aria-pressed=true]{background:var(--soft);box-shadow:inset 3px 0 var(--accent)}.queuetop{display:flex;justify-content:space-between;gap:8px}.mono{font:12px ui-monospace,SFMono-Regular,monospace}.percent{font-weight:700;color:var(--accent);font-size:13px}.queuesub{font-size:12px;color:var(--muted);margin-top:5px}.queuenames{font-size:12px;color:#555c60;margin-top:7px;line-height:1.45;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}.badge{display:inline-block;font-size:10px;padding:3px 7px;border-radius:4px;font-weight:650;letter-spacing:.5px;text-transform:uppercase;background:#e8edf8;color:#476298}.badge.train{background:#e9f2e9;color:#477644}.pairheader{padding:20px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:20px;align-items:center}.pairheader h2{font-size:22px;letter-spacing:-.6px;margin:0 0 5px}.score{text-align:right;white-space:nowrap}.score strong{font-size:30px;line-height:1.1;letter-spacing:-1px;color:var(--accent)}.score small{display:block;color:var(--muted);font-size:11px}.matchbar{padding:14px 20px;background:#fbfbfa;border-bottom:1px solid var(--line)}.matchbar label{display:flex;align-items:center;gap:13px}.matchbar select{flex:1;min-width:0;max-width:620px}.summaryrow{padding:17px 20px;display:flex;gap:10px;flex-wrap:wrap}.pill{border-radius:20px;padding:5px 11px;font-size:12px;background:#eef3ee;color:#49734e}.pill.testonly{background:#edf0f8;color:#536896}.pill.trainonly{background:#fff2e3;color:#976b35}.pill.neutral{background:#f0eff7;color:#656092}.tablewrap{overflow:auto;padding:0 20px 20px}table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums;text-align:left;font-size:13px}th{font-size:11px;letter-spacing:.5px;text-transform:uppercase;color:var(--muted);font-weight:550;padding:11px 9px;border-bottom:1px solid var(--line)}td{padding:11px 9px;border-bottom:1px solid #eef0ed}th:not(:first-child),td:not(:first-child){text-align:right;white-space:nowrap}td:first-child{min-width:180px}tr.testonly{background:#f4f6fc}tr.trainonly{background:#fff8ef}.ingredientnote{font-size:10px;color:var(--muted);margin-left:7px}.diff{color:var(--muted)}.pairfooter{padding:12px 20px;border-top:1px solid var(--line);background:#fbfbfa;color:var(--muted);font-size:12px}.photos{padding:15px 20px;border-top:1px solid var(--line)}summary{cursor:pointer;color:var(--muted);font-size:12px}.photogrid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px}.photogrid img{width:100%;aspect-ratio:1.4;object-fit:contain;background:#f0f1ed;border-radius:6px}.photogrid a{color:var(--accent);font-size:12px}.empty{padding:50px 24px;text-align:center;color:var(--muted)}.coverage{font-size:12px;color:var(--muted);margin:17px 0}.method{margin:20px 0;padding:16px 19px;border:1px solid var(--line);border-radius:9px;background:#efefea;color:#60676a;font-size:12px}.method p{margin:8px 0 0;max-width:1100px}.groupgrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}.group{background:white;border:1px solid var(--line);padding:19px;border-radius:10px}.group h3{font-size:14px;margin:0 0 10px}.chips{display:flex;gap:5px;flex-wrap:wrap;margin:13px 0}.chip{font-size:11px;padding:4px 8px;border-radius:4px;background:var(--soft);color:#625d94}.group p{color:var(--muted);font-size:12px}.group button{margin-top:5px}.pager{display:flex;align-items:center;justify-content:center;gap:16px;margin:20px 0}.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}[hidden]{display:none!important}footer{border-top:1px solid var(--line);padding:17px 3vw;color:var(--muted);font-size:12px}
+@media(max-width:1100px){.workspace{grid-template-columns:260px minmax(0,1fr)}.stats{gap:8px}.stat{padding:14px}.groupgrid{grid-template-columns:repeat(2,minmax(0,1fr))}.brand span{display:none}}@media(max-width:750px){h1{font-size:28px}.stats{grid-template-columns:1fr 1fr}.stat strong{font-size:25px}.workspace{grid-template-columns:1fr}.queue{height:220px;min-height:0}.pairheader{padding:16px}.matchbar{padding:13px}.matchbar label{display:block}.matchbar select{width:100%;margin-top:7px}.score strong{font-size:24px}.pairheader h2{font-size:19px}.tablewrap{padding:0 8px 16px}.summaryrow{padding:14px}.groupgrid{grid-template-columns:1fr}.toolbar .search{flex-basis:100%}.toolbar select{flex:1;min-width:0}header .label{font-size:9px}.views{flex:1;justify-content:center}}
+
+.groupgrid{grid-template-columns:1fr}.recipe-gallery{margin:20px 0 14px;border-top:1px solid var(--line);padding-top:2px}.gallery-split{margin-top:16px}.gallery-split h4{display:flex;align-items:center;gap:10px;font-size:13px;margin:0 0 10px}.gallery-split h4 small{font-weight:400;color:var(--muted)}.recipe-photos{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px}.recipe-photo{margin:0;border:1px solid var(--line);border-radius:7px;overflow:hidden;min-width:0}.recipe-photo a{display:block;color:inherit;text-decoration:none}.recipe-photo a:hover{background:var(--soft)}.recipe-photo img{display:block;width:100%;aspect-ratio:1.35;object-fit:contain;background:#f0f1ed}.recipe-photo figcaption{padding:9px 10px;overflow-wrap:anywhere}.recipe-photo figcaption small{display:block;color:var(--muted);font-size:11px;margin-top:4px}.gallery-empty{padding:12px 0;color:var(--muted);font-size:12px}
+@media(max-width:750px){.recipe-photos{grid-template-columns:repeat(2,minmax(0,1fr))}.gallery-split h4{flex-wrap:wrap}.recipe-photo figcaption{padding:7px}.groupgrid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<header><div class="brand">Nutrition5k <span>/ split inspection</span></div><span class="label">Train ↔ Test · Ingredient overlap</span></header>
+<main>
+<h1>Same ingredients. Different splits?</h1>
+<p class="intro">Find test dishes with identical or nearly identical ingredient lists in training. Compare the ingredients and their weights to see how closely the recipes match.</p>
+<div class="stats" id="stats"><div class="stat"><strong>…</strong><span>Comparing ingredient lists</span></div></div>
+<div class="toolbar">
+<div class="views"><button id="comparetab" aria-pressed="true">Compare dishes</button><button id="groupstab" aria-pressed="false">Exact recipe groups</button></div>
+<label class="search"><span class="sr">Search dish ID or ingredient</span><input id="search" type="search" placeholder="Search dish ID or ingredient…" autocomplete="off"></label>
+<label><span class="sr">Minimum ingredient overlap</span><select id="threshold"><option value="1">Exact ingredient sets · 100%</option><option value="0.9">At least 90% overlap</option><option value="0.8">At least 80% overlap</option><option value="0.5">At least 50% overlap</option><option value="0">All test dishes</option></select></label>
+<label><span class="sr">Photo availability</span><select id="photoscope"><option value="with">Both dishes have photos</option><option value="all">All dishes · include missing photos</option></select></label>
+<button class="button" id="export" disabled>Export pairs ↓</button>
+</div>
+<div id="status" class="coverage" role="status" aria-live="polite">Loading ingredient comparisons…</div>
+<div class="workspace" id="workspace">
+<aside class="panel"><div class="panelhead"><h2>Test dishes</h2><span class="muted" id="queuecount"></span></div><div class="queue" id="queue"></div></aside>
+<section class="panel" id="comparison" aria-label="Ingredient comparison"><div class="empty">Loading…</div></section>
+</div>
+<section id="groupsview" hidden><div class="groupgrid" id="groups"></div><div class="pager"><button class="button" id="gprev">← Previous</button><span class="muted" id="gpage"></span><button class="button" id="gnext">Next →</button></div></section>
+<details class="method"><summary>How overlap is measured</summary><p><strong>Ingredient overlap</strong> = number of shared ingredient IDs ÷ number of distinct ingredient IDs across both dishes (Jaccard similarity). Exact means both dishes contain precisely the same ingredient IDs, regardless of quantities. All ingredients, including seasonings, are included; there is no fuzzy name matching.</p><p><strong>Quantity overlap</strong> = sum of the smaller gram amount for each shared ingredient ÷ sum of the larger gram amount across all ingredients. It breaks ties between dishes with the same ingredient overlap. “Same amounts” requires an exact ingredient set and no more than 0.1 g difference per ingredient. Repeated ingredient IDs within a dish are summed.</p><p>The comparison covers official RGB split dishes with ingredient metadata, including dishes with no downloaded photo. All exact ingredient-set pairs are retained, plus the top 12 overall matches and top 12 matches with training photos per test dish. The photo filter requires photos for both dishes; all-metadata totals remain available under “All dishes”. This is recipe overlap evidence; ingredient overlap alone does not establish data leakage. Common ingredients can occur in independent dishes.</p></details>
+</main>
+<footer id="footer">Local Nutrition5k metadata · Official RGB splits before any validation partition · Read-only</footer>
+<script>
+'use strict';
+const $=id=>document.getElementById(id);
+const esc=value=>String(value).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmt=(n,d=0)=>Number.isFinite(n)?n.toLocaleString(undefined,{maximumFractionDigits:d}):'—';
+const pct=n=>fmt(n*100,1)+'%';
+const dishKey=(split,id)=>split+':'+id;
+let data,report,rows=[],groupRows=[],selected=null,matchIndex=0,view='compare',groupPage=0;
+const dishes=new Map();
+function ingredientList(item){return (item.ingredients||[]).map(x=>x.name).join(', ');}
+function weights(item){const result=new Map();for(const x of item.ingredients||[]){const old=result.get(x.id);result.set(x.id,{name:x.name,grams:x.grams+(old?old.grams:0)});}return result;}
+function photosOnly(){return $('photoscope').value==='with';}
+function hasPhoto(split,id){return Boolean(dishes.get(dishKey(split,id))?.has_image);}
+function photoPair(row,match){return hasPhoto('test',row.test_id)&&hasPhoto('train',match.train_id);}
+function matchesFor(row){const minimum=Number($('threshold').value);return row.matches.filter(m=>m.similarity>=minimum&&(!photosOnly()||photoPair(row,m))).sort((a,b)=>b.similarity-a.similarity||Number(hasPhoto('train',b.train_id))-Number(hasPhoto('train',a.train_id))||b.quantity_similarity-a.quantity_similarity);}
+function groupIds(group,split){return photosOnly()?group['photo_'+split+'_ids']:group[split+'_ids'];}
+function groupPairCount(group){return groupIds(group,'train').length*groupIds(group,'test').length;}
+function renderStats(){
+ const s=report.summary,scoped=report.rows.map(row=>({row,matches:row.matches.filter(m=>!photosOnly()||photoPair(row,m))}));
+ const exactTests=scoped.filter(x=>x.matches.some(m=>m.similarity===1)).length;
+ const exactPairs=scoped.reduce((n,x)=>n+x.matches.filter(m=>m.similarity===1).length,0);
+ const sameAmounts=scoped.reduce((n,x)=>n+x.matches.filter(m=>m.same_amounts).length,0);
+ const testCount=data.items.filter(x=>x.split==='test'&&x.ingredients?.length&&(!photosOnly()||x.has_image)).length;
+ $('stats').innerHTML='<div class="stat"><strong>'+fmt(exactTests)+' <small>/ '+fmt(testCount)+'</small></strong><span>Test dishes with an exact ingredient match'+(photosOnly()?' · photos on both':'')+'</span></div><div class="stat"><strong>'+fmt(exactPairs)+'</strong><span>Identical ingredient-set pairs'+(photosOnly()?' with both photos':' · all metadata')+'</span></div><div class="stat"><strong>'+fmt(sameAmounts)+'</strong><span>Same ingredients & amounts'+(photosOnly()?' · photos on both':'')+'</span></div><div class="stat"><strong>'+fmt(s.shared_ingredient_types)+'</strong><span>Ingredient types shared across all metadata</span></div>';
+}
+function filter(){
+ const query=$('search').value.trim().toLowerCase(),minimum=Number($('threshold').value);
+ rows=report.rows.filter(row=>(matchesFor(row).length>0||(!photosOnly()&&minimum===0))&&row.search.includes(query));
+ rows.sort((a,b)=>(matchesFor(b)[0]?.similarity||0)-(matchesFor(a)[0]?.similarity||0)||(matchesFor(b)[0]?.quantity_similarity||0)-(matchesFor(a)[0]?.quantity_similarity||0)||a.test_id.localeCompare(b.test_id));
+ groupRows=report.groups.filter(group=>group.search.includes(query)&&groupPairCount(group)>0);
+ groupRows.sort((a,b)=>groupPairCount(b)-groupPairCount(a));
+ groupPage=0;
+ if(!rows.some(row=>row.test_id===selected)){selected=rows[0]?.test_id||null;matchIndex=0;}
+ renderStats();renderQueue();renderPair();renderGroups();updateStatus();
+}
+function updateStatus(){
+ $('status').textContent=(view==='compare'?fmt(rows.length)+' test dishes match this filter':fmt(groupRows.length)+' ingredient sets occur in both train and test')+(photosOnly()?' · photos available on both sides':' · all metadata, including dishes without local photos');
+}
+function renderQueue(){
+ $('queuecount').textContent=fmt(rows.length);
+ $('queue').innerHTML=rows.map(row=>{
+ const item=dishes.get(dishKey('test',row.test_id)),visible=matchesFor(row),best=visible[0],exact=visible.filter(m=>m.similarity===1).length;
+ return '<button class="queueitem" data-test="'+esc(row.test_id)+'" aria-pressed="'+(selected===row.test_id)+'"><div class="queuetop"><span class="mono">'+esc(row.test_id)+'</span><span class="percent">'+(best?pct(best.similarity):'0%')+'</span></div><div class="queuesub">'+(exact?fmt(exact)+' exact ingredient '+(exact===1?'match':'matches'):'Closest train ingredient set')+' · '+(photosOnly()?'photos on both':item.has_image?'test photo available':'test photo missing')+'</div><div class="queuenames">'+esc(ingredientList(item))+'</div></button>';
+ }).join('')||'<div class="empty">No dishes match. Try a lower overlap threshold or a different search.</div>';
+}
+function renderPair(){
+ const row=rows.find(x=>x.test_id===selected),target=$('comparison');
+ if(!row){target.innerHTML='<div class="empty">Choose a test dish to compare its ingredients.</div>';return;}
+ const matches=matchesFor(row);
+ if(!matches.length){target.innerHTML='<div class="empty">No training match meets the current ingredient and photo filters.</div>';return;}
+ matchIndex=Math.min(matchIndex,matches.length-1);
+ const match=matches[matchIndex],test=dishes.get(dishKey('test',selected)),train=dishes.get(dishKey('train',match.train_id));
+ const left=weights(test),right=weights(train),ids=Array.from(new Set([...left.keys(),...right.keys()]));
+ ids.sort((a,b)=>{const as=left.has(a)&&right.has(a),bs=left.has(b)&&right.has(b);return Number(bs)-Number(as)||(left.get(a)||right.get(a)).name.localeCompare((left.get(b)||right.get(b)).name);});
+ const shared=ids.filter(id=>left.has(id)&&right.has(id)).length,testOnly=left.size-shared,trainOnly=right.size-shared;
+ const title=match.similarity===1?'Identical ingredient sets':'Similar ingredient sets';
+ const table=ids.map(id=>{const a=left.get(id),b=right.get(id),cls=!a?'trainonly':!b?'testonly':'';const delta=(b?.grams||0)-(a?.grams||0);return '<tr class="'+cls+'"><td>'+esc((a||b).name)+(cls?'<span class="ingredientnote">'+(!a?'train only':'test only')+'</span>':'')+'</td><td>'+(a?fmt(a.grams,2):'—')+'</td><td>'+(b?fmt(b.grams,2):'—')+'</td><td class="diff">'+(Math.abs(delta)<0.005?'0':(delta>0?'+':'')+fmt(delta,2))+'</td></tr>';}).join('');
+ const photo=(item,label)=>'<div><span class="badge '+item.split+'">'+label+'</span>'+(item.has_image?'<a href="/image/'+encodeURIComponent(item.id)+'" target="_blank" rel="noopener"><img loading="lazy" src="/image/'+encodeURIComponent(item.id)+'" alt="'+esc(item.id)+'">Open original ↗</a>':'<p class="muted">No local photo available.</p>')+'</div>';
+ target.innerHTML='<div class="pairheader"><div><h2>'+title+'</h2><div class="muted">Compare recipe identity and measured quantities</div></div><div class="score"><strong>'+pct(match.similarity)+'</strong><small>ingredient overlap</small></div></div><div class="matchbar"><label><span class="badge">Test</span><span class="mono">'+esc(selected)+'</span><span class="muted">↔</span><span class="badge train">Train</span><select id="trainmatch" aria-label="Training dish to compare">'+matches.map((m,i)=>'<option value="'+i+'"'+(i===matchIndex?' selected':'')+'>'+esc(m.train_id)+' · '+pct(m.similarity)+' ingredients · '+pct(m.quantity_similarity)+' quantities · '+(hasPhoto('train',m.train_id)?'photo':'no photo')+'</option>').join('')+'</select></label><div class="muted" style="margin-top:8px">'+fmt(matches.length)+' training matches in this filter'+(row.exact_count?' · '+fmt(matches.filter(m=>m.similarity===1).length)+' exact matches shown / '+fmt(row.exact_count)+' in all metadata':' · closest ingredient matches shown')+'</div></div><div class="summaryrow"><span class="pill">'+shared+' shared</span><span class="pill testonly">'+testOnly+' test only</span><span class="pill trainonly">'+trainOnly+' train only</span><span class="pill neutral">'+pct(match.quantity_similarity)+' quantity overlap</span>'+(match.same_amounts?'<span class="pill">Same amounts · within 0.1 g</span>':'')+'</div><div class="tablewrap"><table><thead><tr><th>Ingredient</th><th>Test (g)</th><th>Train (g)</th><th>Train − test (g)</th></tr></thead><tbody>'+table+'</tbody><tfoot><tr><td><strong>Sum of ingredient weights</strong></td><td>'+fmt([...left.values()].reduce((n,x)=>n+x.grams,0),2)+'</td><td>'+fmt([...right.values()].reduce((n,x)=>n+x.grams,0),2)+'</td><td></td></tr></tfoot></table></div><div class="pairfooter">Test: '+fmt(test.calories,1)+' kcal · '+fmt(test.mass,1)+' g food mass &nbsp; | &nbsp; Train: '+fmt(train.calories,1)+' kcal · '+fmt(train.mass,1)+' g food mass</div><details class="photos" open><summary>Dish photos</summary><div class="photogrid">'+photo(test,'Test')+photo(train,'Train')+'</div></details>';
+ $('trainmatch').addEventListener('change',event=>{matchIndex=Number(event.target.value);renderPair();});
+ const params=new URLSearchParams({test:selected,train:match.train_id,photos:$('photoscope').value});history.replaceState(null,'','?'+params.toString());
+}
+function recipeGallery(group){
+ return '<div class="recipe-gallery">'+['train','test'].map(split=>{
+  const available=group['photo_'+split+'_ids'],preview=available.slice(0,5),label=split==='train'?'Train':'Test';
+  return '<section class="gallery-split" aria-label="'+label+' recipe photos"><h4><span class="badge '+split+'">'+label+'</span><small>Showing '+preview.length+' of '+fmt(available.length)+' local photos</small></h4>'+(preview.length?'<div class="recipe-photos">'+preview.map(id=>{
+   const item=dishes.get(dishKey(split,id));
+   const grams=(item.ingredients||[]).reduce((total,ingredient)=>total+ingredient.grams,0);
+   return '<figure class="recipe-photo"><a href="/image/'+encodeURIComponent(id)+'" target="_blank" rel="noopener" aria-label="Open '+label.toLowerCase()+' photo '+esc(id)+'"><img loading="lazy" decoding="async" src="/image/'+encodeURIComponent(id)+'" alt="'+label+' dish '+esc(id)+'"><figcaption><span class="mono">'+esc(id)+'</span><small>'+fmt(grams,1)+' g total ingredients · open original ↗</small></figcaption></a></figure>';
+  }).join('')+'</div>':'<div class="gallery-empty">No local photos in this split for this ingredient set.</div>')+'</section>';
+ }).join('')+'</div>';
+}
+function renderGroups(){
+ const start=groupPage*18,visible=groupRows.slice(start,start+18),pages=Math.max(1,Math.ceil(groupRows.length/18));
+ $('groups').innerHTML=visible.map(group=>{
+ const trains=groupIds(group,'train'),tests=groupIds(group,'test');
+ const photoPairs=group.photo_train_ids.length*group.photo_test_ids.length;
+ const chosen=group.photo_test_ids[0]||tests[0];
+ return '<article class="group"><h3>'+group.ingredient_ids.length+'-ingredient recipe</h3><div class="chips">'+group.ingredient_ids.map(id=>'<span class="chip">'+esc(report.ingredient_names[id])+'</span>').join('')+'</div><p><strong>'+fmt(trains.length)+'</strong> train dishes × <strong>'+fmt(tests.length)+'</strong> test dishes'+(photosOnly()?' with photos':' in metadata')+'<br>'+fmt(groupPairCount(group))+' identical ingredient-set pairs</p><p>Photo coverage: '+fmt(group.photo_train_ids.length)+' train / '+fmt(group.photo_test_ids.length)+' test · '+fmt(photoPairs)+' photo pairs<br>All metadata: '+fmt(group.train_ids.length)+' train / '+fmt(group.test_ids.length)+' test · '+fmt(group.pairs)+' pairs</p>'+recipeGallery(group)+'<button class="button" data-group-test="'+esc(chosen)+'">'+(photoPairs?'Compare ingredient weights (one pair) →':'Compare ingredient lists →')+'</button></article>';
+ }).join('')||'<div class="empty">No shared recipe groups match these filters. Try “All dishes” to include recipes without photos.</div>';
+ $('gpage').textContent='Page '+(groupPage+1)+' of '+pages;$('gprev').disabled=groupPage===0;$('gnext').disabled=groupPage>=pages-1;
+}
+function setView(next){view=next;$('workspace').hidden=view!=='compare';$('groupsview').hidden=view!=='groups';$('comparetab').setAttribute('aria-pressed',String(view==='compare'));$('groupstab').setAttribute('aria-pressed',String(view==='groups'));$('threshold').disabled=view==='groups';updateStatus();}
+function csvCell(value){return '"'+String(value??'').replaceAll('"','""')+'"';}
+function exportPairs(){
+ const lines=[['test_id','train_id','ingredient_overlap','quantity_overlap','shared_ingredients','union_ingredients','same_amounts_within_0.1g','test_ingredients','train_ingredients','test_has_photo','train_has_photo']];
+ const exportRows=view==='groups'?report.rows.filter(row=>groupRows.some(g=>g.test_ids.includes(row.test_id))):rows;
+ const groupSignatures=new Set(groupRows.map(g=>g.ingredient_ids.join('|')));
+ for(const row of exportRows){const test=dishes.get(dishKey('test',row.test_id));if(view==='groups'&&!groupSignatures.has([...weights(test).keys()].sort().join('|')))continue;for(const m of row.matches){if((view==='groups'?m.similarity!==1:m.similarity<Number($('threshold').value))||(photosOnly()&&!photoPair(row,m)))continue;const train=dishes.get(dishKey('train',m.train_id));lines.push([row.test_id,m.train_id,m.similarity,m.quantity_similarity,m.shared,m.union,m.same_amounts,ingredientList(test),ingredientList(train),test.has_image,train.has_image]);}}
+ const blob=new Blob(['\uFEFF'+lines.map(row=>row.map(csvCell).join(',')).join('\r\n')],{type:'text/csv;charset=utf-8'}),url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download='nutrition5k-ingredient-overlap.csv';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
+$('queue').addEventListener('click',event=>{const button=event.target.closest('[data-test]');if(!button)return;selected=button.dataset.test;matchIndex=0;renderQueue();renderPair();});
+$('groups').addEventListener('click',event=>{const button=event.target.closest('[data-group-test]');if(!button)return;$('search').value='';$('threshold').value='1';selected=button.dataset.groupTest;matchIndex=0;filter();setView('compare');$('comparison').scrollIntoView({block:'start',behavior:'smooth'});});
+$('photoscope').addEventListener('change',()=>{matchIndex=0;filter();});
+$('search').addEventListener('input',filter);$('threshold').addEventListener('change',()=>{matchIndex=0;filter();});$('comparetab').addEventListener('click',()=>setView('compare'));$('groupstab').addEventListener('click',()=>setView('groups'));$('export').addEventListener('click',exportPairs);$('gprev').addEventListener('click',()=>{groupPage--;renderGroups();});$('gnext').addEventListener('click',()=>{groupPage++;renderGroups();});
+async function init(){try{
+ const responses=await Promise.all([fetch('/api/dataset'),fetch('/api/ingredients')]);if(responses.some(r=>!r.ok))throw Error('Could not load ingredient data');[data,report]=await Promise.all(responses.map(r=>r.json()));
+ for(const item of data.items)dishes.set(dishKey(item.split,item.id),item);
+ for(const row of report.rows){const item=dishes.get(dishKey('test',row.test_id));row.search=(row.test_id+' '+ingredientList(item)+' '+row.matches.map(m=>m.train_id).join(' ')).toLowerCase();}
+ for(const group of report.groups)group.search=(group.ingredient_ids.map(id=>report.ingredient_names[id]).join(' ')+' '+group.train_ids.join(' ')+' '+group.test_ids.join(' ')).toLowerCase();
+ const s=report.summary;
+
+ $('footer').textContent='Official RGB splits · '+fmt(s.train_dishes)+' train / '+fmt(s.test_dishes)+' test dishes with ingredients · '+fmt(s.missing_ingredients)+' dishes without ingredient metadata · Includes dishes without local photos';
+ const params=new URLSearchParams(location.search);if(params.get('photos')==='all')$('photoscope').value='all';
+ const initial=report.rows.find(r=>r.test_id===params.get('test'));
+ if(initial){selected=initial.test_id;$('threshold').value='0';const idx=matchesFor(initial).findIndex(m=>m.train_id===params.get('train'));matchIndex=Math.max(0,idx);}
+ filter();$('export').disabled=false;
+ }catch(error){$('status').textContent='Could not load ingredient comparisons. Refresh to retry.';$('comparison').innerHTML='<div class="empty">'+esc(error.message)+'</div>';console.error(error);}}
+init();
+</script>
+</body>
+</html>

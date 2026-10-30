@@ -23,6 +23,7 @@ from schemas import (
     PredictorConfig,
     SignedNutrition,
 )
+from segmentation import FoodSegmenter, SegmentationConfig, apply_food_mask
 
 BACKBONES = {
     "resnet": "resnet152.a1_in1k",
@@ -74,6 +75,7 @@ class TrainConfig(BaseModel):
     grad_clip: float = Field(default=1.0, gt=0)
     augmentation: Literal["none"] = "none"
     targets: tuple[str, ...] = TARGETS
+    segmentation: SegmentationConfig | None = None
 
     @model_validator(mode="after")
     def check_targets(self):
@@ -206,10 +208,11 @@ class VisionPredictorConfig(PredictorConfig):
     versions: dict[str, str]
     loss: str = "standardized_smooth_l1"
     uncertainty: str = "none"
+    segmentation: SegmentationConfig | None = None
 
 
 class VisionPredictor(Predictor):
-    """Self-contained checkpoint adapter for the existing evaluation harness."""
+    """Checkpoint adapter with optional pinned pretrained food segmentation."""
 
     config: VisionPredictorConfig
 
@@ -220,11 +223,22 @@ class VisionPredictor(Predictor):
         if saved.get("format_version") != 1:
             raise ValueError("Unsupported vision checkpoint format")
         config = TrainConfig.model_validate(saved["train_config"])
+        if config.segmentation is not None:
+            import re
+
+            if not re.fullmatch(r"[0-9a-f]{40}", config.segmentation.revision):
+                raise ValueError("Checkpoint must pin the segmentation revision")
         self.model = NutritionRegressor(config, load_pretrained=False)
         self.model.load_state_dict(saved["model"])
         self.model.to(device).eval()
         self.transform = create_transform(saved["data_config"])
         self.device = torch.device(device)
+        self.segmenter = (
+            FoodSegmenter(config.segmentation, device) if config.segmentation else None
+        )
+        versions = {n: version(n) for n in ("timm", "torchvision", "pillow")}
+        if self.segmenter is not None:
+            versions["transformers"] = version("transformers")
         with checkpoint.open("rb") as stream:
             digest = hashlib.file_digest(stream, "sha256").hexdigest()
         self.config = VisionPredictorConfig(
@@ -233,7 +247,8 @@ class VisionPredictor(Predictor):
             checkpoint_sha256=digest,
             device=device,
             data_config=saved["data_config"],
-            versions={n: version(n) for n in ("timm", "torchvision", "pillow")},
+            versions=versions,
+            segmentation=config.segmentation,
             loss=config.loss,
             uncertainty="Gaussian std in backend_metadata; sigma is 95% half-width; explicit bounds use raw mean"
             if config.loss == "gaussian_nll"
@@ -243,8 +258,20 @@ class VisionPredictor(Predictor):
     def predict(self, image: ImageInput) -> Prediction:
         from PIL import Image
 
+        segmentation_metadata = {}
         with Image.open(io.BytesIO(image.data)) as decoded:
-            tensor = self.transform(decoded.convert("RGB")).unsqueeze(0).to(self.device)
+            rgb = decoded.convert("RGB")
+            if self.segmenter is not None:
+                mask = self.segmenter.mask(rgb)
+                rgb = apply_food_mask(rgb, mask)
+                segmentation_metadata = {
+                    "segmentation": {
+                        **self.segmenter.config.model_dump(),
+                        "foreground_fraction": mask.histogram()[255]
+                        / (mask.width * mask.height),
+                    }
+                }
+            tensor = self.transform(rgb).unsqueeze(0).to(self.device)
         with torch.inference_mode():
             output = self.model(tensor)
             if self.model.config.loss == "gaussian_nll":
@@ -262,6 +289,7 @@ class VisionPredictor(Predictor):
                     ),
                 )
                 self.last_metadata = {
+                    **segmentation_metadata,
                     "mass_g": max(0.0, raw["mass_g"]),
                     "gaussian_mean": raw,
                     "gaussian_std": scales,
@@ -275,5 +303,5 @@ class VisionPredictor(Predictor):
             values = self.model.quantities(output)[0].cpu().tolist()
         quantities = dict(zip(TARGETS, values, strict=True))
         # The evaluator's established schema has four nutrients; preserve it.
-        self.last_metadata = {"mass_g": quantities["mass_g"]}
+        self.last_metadata = {"mass_g": quantities["mass_g"], **segmentation_metadata}
         return Prediction(mean=Nutrition(**{key: quantities[key] for key in FIELDS}))

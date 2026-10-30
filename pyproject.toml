@@ -16,6 +16,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+segmentation = ["transformers>=4.45,<5"]
 vision = [
     "codetiming>=1.4,<2",
     "pillow>=11",

@@ -30,6 +30,7 @@ from checkpointing import (
 )
 from determinism import configure_determinism
 from run import PROJECT_DIR, GitRevision
+from segmentation import prepare_masks
 from timing import estimate_runtime, phase_timer
 from tracking import wandb_metrics, wandb_session, wandb_summary
 from vision import (
@@ -72,7 +73,10 @@ def load_config(path: Path, overrides: list[str]):
         values[key] = parsed
     config = TrainConfig.model_validate(values)
     changes = {
-        key: {"reference": getattr(reference, key), "chosen": getattr(config, key)}
+        key: {
+            "reference": reference.model_dump(mode="json")[key],
+            "chosen": config.model_dump(mode="json")[key],
+        }
         for key in values
         if getattr(reference, key) != getattr(config, key)
     }
@@ -116,6 +120,37 @@ def prepare(
     print(
         f"Prepared {output}: {len(manifest.train)} train, {len(manifest.validation)} validation"
     )
+
+
+@app.command()
+def segment_preview(
+    config: Annotated[Path, typer.Option()],
+    manifest: Annotated[Path, typer.Option()],
+    output: Annotated[Path, typer.Option()],
+    limit: Annotated[int, typer.Option(min=1)] = 32,
+    device: str = "cuda",
+):
+    """Preview frozen food masks on training images only, without fitting heads."""
+    settings, _ = load_config(config, [])
+    if settings.segmentation is None:
+        raise ValueError("Config must enable segmentation")
+    if output.exists():
+        raise ValueError("Output already exists; use a fresh preview directory")
+    manifest = manifest.resolve()
+    data = TrainingManifest.model_validate_json(manifest.read_bytes())
+    configure_determinism(settings.seed)
+    # Manifest order is seeded; sorting also makes previews stable across reruns.
+    selected = sorted(data.train, key=lambda sample: sample.id)[:limit]
+    _, _, diagnostics = prepare_masks(
+        selected,
+        manifest.parent,
+        settings.segmentation,
+        output / "masks",
+        device,
+        previews=output / "overlays",
+    )
+    save_json(output / "segmentation.json", diagnostics)
+    print(f"Saved {len(selected)} food-mask previews to {output}")
 
 
 def epoch_pass(model, loader, device, config, optimizer=None, scaler=None):
@@ -266,6 +301,7 @@ def run_training(
         "config_file": str(config.resolve()),
         "changes_from_reference": changes,
         "train_config": settings.model_dump(mode="json"),
+        "requested_train_config": settings.model_dump(mode="json"),
         "backbone_id": BACKBONES[settings.backbone],
         "data_config": preprocessing,
         "manifest": str(manifest),
@@ -307,8 +343,15 @@ def run_training(
     saved = None
     if resume:
         original = json.loads((output / "config.json").read_text())
-        if original["train_config"] != settings.model_dump(mode="json"):
+        requested = TrainConfig.model_validate(
+            original.get("requested_train_config", original["train_config"])
+        )
+        if requested != settings:
             raise ValueError("Resolved training config differs from the original run")
+        # Reuse the original immutable segmentation revision, even when the
+        # reference config requests a moving Hub branch such as "main".
+        settings = TrainConfig.model_validate(original["train_config"])
+        chosen["train_config"] = settings.model_dump(mode="json")
         if original["manifest_sha256"] != chosen["manifest_sha256"] or original[
             "data_config"
         ] != json.loads(json.dumps(preprocessing)):
@@ -328,7 +371,7 @@ def run_training(
                 "Legacy checkpoint has weights only; exact training resume is unavailable"
             )
         if saved is not None and (
-            saved["train_config"] != settings.model_dump(mode="json")
+            TrainConfig.model_validate(saved["train_config"]) != settings
             or saved["manifest_sha256"] != chosen["manifest_sha256"]
         ):
             raise ValueError(
@@ -349,6 +392,22 @@ def run_training(
         )
     determinism = configure_determinism(settings.seed)
     verify_images(data, manifest.parent)
+    masks = None
+    segmentation_diagnostics = None
+    if settings.segmentation is not None:
+        resolved, masks, segmentation_diagnostics = prepare_masks(
+            [*data.train, *data.validation],
+            manifest.parent,
+            settings.segmentation,
+            manifest.parent / "segmentation-masks",
+            settings.device,
+        )
+        settings = settings.model_copy(update={"segmentation": resolved})
+        chosen["train_config"] = settings.model_dump(mode="json")
+        chosen["segmentation"] = segmentation_diagnostics
+        # Loading CLIPSeg may consume RNG state. Cold and warm mask caches must
+        # initialize identical regression heads and replay identical training.
+        configure_determinism(settings.seed)
     model = NutritionRegressor(settings)
     # Resolve before initialization/download and check the result is identical.
     if model.data_config != preprocessing:
@@ -364,7 +423,7 @@ def run_training(
     generator = torch.Generator().manual_seed(settings.seed)
     loaders = [
         DataLoader(
-            NutritionDataset(samples, manifest.parent, transform),
+            NutritionDataset(samples, manifest.parent, transform, masks=masks),
             batch_size=settings.batch_size,
             shuffle=training,
             num_workers=settings.workers,
@@ -443,6 +502,8 @@ def run_training(
     if settings.wandb_mode != "disabled":
         chosen["dependencies"]["wandb"] = version("wandb")
     chosen["dependencies"]["codetiming"] = version("codetiming")
+    if settings.segmentation is not None:
+        chosen["dependencies"]["transformers"] = version("transformers")
     if not resume:
         output.mkdir(parents=True, exist_ok=False)
         save_json(output / "config.json", chosen)
@@ -554,6 +615,12 @@ def run_training(
                 "selection_metric": settings.selection_metric,
                 "best_selection_score": best,
                 "manifest_sha256": chosen["manifest_sha256"],
+                "segmentation": {
+                    "config": settings.segmentation.model_dump(),
+                    "transformers": chosen["dependencies"]["transformers"],
+                }
+                if settings.segmentation is not None
+                else None,
             }
             metrics = {
                 "epoch": epoch,
