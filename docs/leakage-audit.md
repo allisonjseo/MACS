@@ -79,12 +79,19 @@ test photos:
 | ResNet-152 | 0.936 | 17.6% (14.1 to 21.6%) | 135.9 (125.1 to 147.7) | 75.0 |
 | Swin V2 | 0.917 | 13.7% (10.7 to 17.5%) | 108.9 (100.9 to 118.6) | 58.9 |
 | DINOv3 | 0.916 | 13.7% (10.7 to 17.5%) | 96.6 (88.3 to 105.8) | 53.2 |
+| ResNet-152 + CLIPSeg | 0.931 | 12.7% (9.8 to 16.4%) | 146.1 (136.0 to 156.8) | 72.6 |
+| Swin V2 + CLIPSeg | 0.970 | 14.8% (11.6 to 18.6%) | 113.9 (105.3 to 123.3) | 68.3 |
+| DINOv3 + CLIPSeg | 0.902 | 11.2% (8.4 to 14.7%) | 98.9 (90.8 to 107.6) | 55.1 |
 | Training-label Gaussian | 0.886 | 8.9% (6.5 to 12.1%) | 307.0 (292.0 to 321.7) | 159.0 |
 
+CLIPSeg rows use the default (unswept) runs at epochs 5, 8 and 15; the 9 test
+photos with an empty mask fall back to the unmasked image.
+
 Paired bootstrap: DINOv3's mean excess is 12.3 kcal below Swin V2 (95% CI 3.8 to
-21.3) and 39.3 kcal below ResNet-152 (28.6 to 50.6). No model keeps test
-underestimation within the 10% budget tuned on the leaky validation split, and
-DINOv3's nominal 95% quantile covers 88% of test meals.
+21.3) and 39.3 kcal below ResNet-152 (28.6 to 50.6); DINOv3 + CLIPSeg is tied with
+DINOv3 (2.3 kcal higher, -4.3 to 8.7). No model keeps test underestimation within
+the 10% budget tuned on the leaky validation split. DINOv3's nominal 95% quantile
+covers 88% of test meals (92% with CLIPSeg).
 
 ## Not yet done
 

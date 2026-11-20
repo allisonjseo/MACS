@@ -40,12 +40,14 @@ exact_set_kept = set(g["test_photos"]) - {
 }
 train_kcal = [g["meta"][d]["kcal"] for d in g["training"]]
 
+ORDER = ("resnet", "swin", "dino", "resnet_clipseg", "swin_clipseg", "dino_clipseg")
 rows = defaultdict(lambda: defaultdict(list))
 for r in csv.DictReader(open(PREDICTIONS)):
     rows[r["model"]][r["split"]].append(
         (r["dish_id"], float(r["target_calories_kcal"]),
          float(r["gaussian_mean_calories_kcal"]), float(r["gaussian_std_calories_kcal"]))
     )
+MODELS = [m for m in ORDER if m in rows]
 # Training-label Gaussian baseline: the same constant distribution for every image.
 mu, sd = fmean(train_kcal), pstdev(train_kcal)
 for split in ("validation", "test"):
@@ -92,7 +94,7 @@ def report(subset_name, subset):
     print(f"{'model':18s} {'q':>6s} {'val under':>9s} {'test under (95% CI)':>26s} "
           f"{'mean excess kcal (95% CI)':>28s} {'MAE':>6s}")
     tuned = {}
-    for model in ("resnet", "swin", "dino", "training_gaussian"):
+    for model in (*MODELS, "training_gaussian"):
         val, test = rows[model]["validation"], rows[model]["test"]
         test = [r for r in test if r[0] in subset]
         q = tune(val)
@@ -112,7 +114,7 @@ def report(subset_name, subset):
               f"{exc:9.1f} ({elo:6.1f} to {ehi:6.1f}) {mae:6.1f}")
     # Paired bootstrap: DINO minus each other model, on the same images.
     ids = list(tuned["dino"])
-    for other in ("resnet", "swin", "training_gaussian"):
+    for other in (*[m for m in MODELS if m != "dino"], "training_gaussian"):
         def diff(s, a=tuned["dino"], b=tuned[other]):
             ea = [a[i][1] - a[i][0] for i in s if a[i][1] >= a[i][0]]
             eb = [b[i][1] - b[i][0] for i in s if b[i][1] >= b[i][0]]
@@ -125,7 +127,7 @@ def report(subset_name, subset):
 
 # Sanity check against Cyril's summary: all 507 test images at the nominal 95% quantile.
 print("Check vs. shared summary table (all test images, q = 0.95):")
-for model in ("resnet", "swin", "dino"):
+for model in MODELS:
     est = estimates(rows[model]["test"], 0.95)
     print(f"  {model:6s} n={len(est)} under={under_rate(est):.2%} excess={mean_excess(est):.1f} "
           f"test MAE={fmean(abs(max(0.0, m) - y) for _, y, m, _ in rows[model]['test']):.1f}")
@@ -136,7 +138,7 @@ report("exact ingredient-set disjoint (previous report)", exact_set_kept)
 
 # Calibration: empirical coverage of nominal quantiles on the leak-free subset.
 print("\nCalibration on leak-free test subset (share of meals with Y <= quantile):")
-for model in ("resnet", "swin", "dino"):
+for model in MODELS:
     test = [r for r in rows[model]["test"] if r[0] in leak_free]
     cells = []
     for q in (0.5, 0.8, 0.9, 0.95):
