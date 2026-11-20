@@ -11,6 +11,7 @@ python -I analysis/leakage/leakage_analysis.py /tmp/n5k-meta  # exact-set vs 0.8
 python -I analysis/leakage/cutoff_check.py /tmp/n5k-meta      # pairs near the 0.8 cutoff
 python -I analysis/leakage/same_plate.py /tmp/n5k-meta        # same-session rule
 python -I analysis/leakage/subset200.py /tmp/n5k-meta         # why the table has 96 images
+python -I analysis/leakage/task_metric.py PREDICTIONS.csv /tmp/n5k-meta  # task metric
 ```
 
 The validation split is reproduced from `vision_data.py` (seeded dish-ID shuffle,
@@ -65,8 +66,28 @@ underestimates 13/96 vs. 18/96, a 5.2-point (28% relative) reduction with 95% CI
 −15.7 to +5.3 points; mean excess falls 38% (188.7 to 117.2 kcal). A paired test
 needs the per-image predictions.
 
+## Task metric on the leak-free subset
+
+`task_metric.py` computes the report's single task metric from per-image Gaussian
+predictions: mean excess when overestimating, at the quantile tuned on validation
+to underestimate at most 10% of meals. Selected checkpoints (ResNet-152 trial 3
+epoch 12, Swin V2 trial 3 epoch 12, DINOv3 trial 0 epoch 18) on the 393 leak-free
+test photos:
+
+| Model | Tuned q | Test underestimation (95% CI) | Mean excess, kcal (95% CI) | MAE |
+| --- | --- | --- | --- | --- |
+| ResNet-152 | 0.936 | 17.6% (14.1 to 21.6%) | 135.9 (125.1 to 147.7) | 75.0 |
+| Swin V2 | 0.917 | 13.7% (10.7 to 17.5%) | 108.9 (100.9 to 118.6) | 58.9 |
+| DINOv3 | 0.916 | 13.7% (10.7 to 17.5%) | 96.6 (88.3 to 105.8) | 53.2 |
+| Training-label Gaussian | 0.886 | 8.9% (6.5 to 12.1%) | 307.0 (292.0 to 321.7) | 159.0 |
+
+Paired bootstrap: DINOv3's mean excess is 12.3 kcal below Swin V2 (95% CI 3.8 to
+21.3) and 39.3 kcal below ResNet-152 (28.6 to 50.6). No model keeps test
+underestimation within the 10% budget tuned on the leaky validation split, and
+DINOv3's nominal 95% quantile covers 88% of test meals.
+
 ## Not yet done
 
-- Re-evaluate every model, including GPT-Luna, on the same-session subset (393).
+- Re-evaluate SIFT and GPT-Luna on the same-session subset (393).
 - Re-split train/validation by day and repeat model selection.
 - Thresholds (4 h, 3%, 80%) are judgment calls; check more flagged pairs.
